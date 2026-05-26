@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>hndash</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f6f6ef; color: #333; padding: 16px; }
+  .container { max-width: 960px; margin: 0 auto; }
+
+  .header { display: flex; align-items: center; gap: 12px; padding: 12px 16px; background: #ff6600; color: #fff; border-radius: 4px; margin-bottom: 16px; }
+  .header h1 { font-size: 18px; margin-right: auto; }
+  .header .status { font-size: 13px; opacity: .85; }
+  .btn { display: inline-block; padding: 6px 14px; border: none; border-radius: 3px; cursor: pointer; font-size: 13px; background: rgba(255,255,255,.2); color: #fff; text-decoration: none; }
+  .btn:hover { background: rgba(255,255,255,.35); }
+  .btn-sm { font-size: 11px; padding: 3px 8px; }
+
+  .post { background: #fff; border: 1px solid #e0e0d0; border-radius: 3px; margin-bottom: 10px; }
+  .post-header { display: flex; align-items: center; gap: 8px; padding: 10px 14px; cursor: pointer; }
+  .post-header:hover { background: #fafaf5; }
+  .post-title { flex: 1; font-size: 14px; }
+  .post-title a { color: #222; text-decoration: none; }
+  .post-title a:hover { text-decoration: underline; }
+  .post-meta { font-size: 12px; color: #666; white-space: nowrap; }
+  .post-meta span { margin-left: 6px; }
+  .badge { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 11px; font-weight: 600; }
+  .badge-done { background: #e6f4ea; color: #137333; }
+  .badge-error { background: #fce8e6; color: #c5221f; }
+  .badge-pending { background: #fef7e0; color: #b06000; }
+
+  .summaries { padding: 0 14px 10px; display: none; }
+  .post.expanded .summaries { display: block; }
+  .summary { margin-top: 8px; padding: 8px 10px; background: #fafaf5; border-radius: 3px; border-left: 3px solid #ddd; font-size: 13px; line-height: 1.5; }
+  .summary-body { white-space: pre-wrap; }
+  .summary-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; font-size: 11px; font-weight: 600; color: #888; text-transform: uppercase; }
+  .summary-actions { display: flex; gap: 4px; }
+
+  .unread-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #ff6600; margin-right: 4px; vertical-align: baseline; position: relative; top: 1px; }
+
+  .refresh-spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid rgba(255,255,255,.3); border-top-color: #fff; border-radius: 50%; animation: spin .6s linear infinite; vertical-align: middle; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <h1>hndash</h1>
+    <span class="status">
+      {% if last_fetch_time %}
+        Last fetch: {{ last_fetch_time }} &middot; {{ posts|length }} posts
+      {% else %}
+        Not yet fetched
+      {% endif %}
+    </span>
+    <button class="btn" id="refreshBtn" onclick="triggerRefresh()">Refresh</button>
+    {% if posts %}
+    <button class="btn" onclick="markAllRead()">Mark all read</button>
+    <button class="btn" onclick="apiPost('/remove-all-posts')">Remove all</button>
+    {% endif %}
+  </div>
+
+  {% for ps in posts %}
+  <div class="post" data-hn-id="{{ ps.post.hn_id }}">
+    <div class="post-header" onclick="this.parentElement.classList.toggle('expanded')">
+      <span class="post-title">
+        {% if ps.post.url %}
+          <a href="{{ ps.post.url }}" target="_blank">{{ ps.post.title }}</a>
+        {% else %}
+          {{ ps.post.title }}
+        {% endif %}
+        <span style="font-size:11px;color:#888;">
+          ({{ ps.post.author }} &middot; {{ ps.post.created_at }}
+          &middot; <a href="https://news.ycombinator.com/item?id={{ ps.post.hn_id }}" target="_blank" style="color:#888;">HN</a>)
+        </span>
+      </span>
+      <span class="post-meta">
+        <span>{{ ps.post.points }} pts</span>
+        <span>{{ ps.post.num_comments }} cmts</span>
+        <span class="badge badge-{{ ps.post.fetch_status }}">{{ ps.post.fetch_status }}</span>
+      </span>
+    </div>
+
+    <div class="summaries">
+      <div style="margin-bottom:6px;">
+        <button class="btn btn-sm" style="background:#f0f0e8;color:#333;" onclick="event.stopPropagation();resummarize({{ ps.post.hn_id }})">Re-summarize</button>
+      </div>
+
+      {% for summary in ps.summaries %}
+      <div class="summary" data-summary-type="{{ summary.summary_type }}" data-summary-id="{{ summary.id }}">
+        <div class="summary-header">
+          <span>
+            {% if not summary.read_at %}<span class="unread-dot"></span>{% endif %}
+            {{ summary.summary_type }}
+          </span>
+          <span class="summary-actions">
+            <button class="btn btn-sm" style="background:#f0f0e8;color:#333;" onclick="event.stopPropagation();apiPost('/remove-post/{{ ps.post.hn_id }}')">Remove</button>
+            {% if not summary.read_at %}
+            <button class="btn btn-sm" style="background:#f0f0e8;color:#333;" onclick="event.stopPropagation();markRead({{ ps.post.hn_id }},'{{ summary.summary_type }}')">Mark read</button>
+            {% endif %}
+          </span>
+        </div>
+        <div class="summary-body">{{ summary.content }}</div>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+  {% else %}
+  <p style="text-align:center;color:#888;margin-top:60px;">No posts yet. Click <strong>Refresh</strong> to fetch stories.</p>
+  {% endfor %}
+</div>
+
+<script>
+async function apiPost(url) {
+  try {
+    const resp = await fetch(url, { method: 'POST' });
+    if (!resp.ok && resp.status !== 409) {
+      const text = await resp.text();
+      alert('Error: ' + text);
+    } else if (resp.status === 409) {
+      alert('Fetch already in progress');
+    } else {
+      location.reload();
+    }
+  } catch (e) {
+    alert('Network error: ' + e.message);
+  }
+}
+
+function triggerRefresh() {
+  const btn = document.getElementById('refreshBtn');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="refresh-spinner"></span>';
+  apiPost('/refresh').finally(() => {
+    btn.disabled = false;
+    btn.textContent = 'Refresh';
+  });
+}
+
+function markAllRead() { apiPost('/mark-read-all'); }
+function resummarize(hnId) { if (confirm('Re-summarize this post?')) apiPost('/resummarize/' + hnId); }
+function markRead(hnId, type) { apiPost('/mark-read/' + hnId + '/' + type); }
+</script>
+</body>
+</html>

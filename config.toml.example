@@ -1,0 +1,25 @@
+[hn]
+min_points = 20
+min_comments = 10
+fetch_interval_minutes = 30
+max_fetch_pages = 5
+max_age_hours = 24
+
+[llm]
+api_key = "sk-your-deepseek-api-key"
+model = "deepseek-chat"
+base_url = "https://api.deepseek.com"
+
+[server]
+host = "127.0.0.1"
+port = 8080
+
+[db]
+path = "hndash.db"
+
+[article]
+fallback_order = ["archive.is", "web.archive.org"]
+timeout_secs = 30
+max_bytes = 204800
+min_text_length = 100
+user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"

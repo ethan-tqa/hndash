@@ -1,3 +1,5 @@
+use tracing::warn;
+
 use crate::models::HnConfig;
 
 /// Algolia search API response containing a page of story hits.
@@ -98,6 +100,15 @@ pub fn search_url(config: &HnConfig, page: u32) -> String {
     )
 }
 
+fn truncate(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_string()
+    } else {
+        let truncated: String = s.chars().take(max).collect();
+        format!("{}... ({} total chars)", truncated, s.len())
+    }
+}
+
 /// Fetch one page of stories from the Algolia HN search API.
 pub async fn search_stories(
     client: &reqwest::Client,
@@ -105,8 +116,36 @@ pub async fn search_stories(
     page: u32,
 ) -> Option<SearchResponse> {
     let url = search_url(config, page);
-    let resp = client.get(&url).send().await.ok()?;
-    resp.json::<SearchResponse>().await.ok()
+
+    let resp = match client.get(&url).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            warn!(%page, error = %e, "search_stories HTTP error");
+            return None;
+        }
+    };
+
+    let status = resp.status();
+    let body = match resp.text().await {
+        Ok(b) => b,
+        Err(e) => {
+            warn!(%page, %status, error = %e, "search_stories failed to read response body");
+            return None;
+        }
+    };
+
+    if !status.is_success() {
+        warn!(%page, %status, body = %truncate(&body, 500), "search_stories non-success status");
+        return None;
+    }
+
+    match serde_json::from_str::<SearchResponse>(&body) {
+        Ok(r) => Some(r),
+        Err(e) => {
+            warn!(%page, %status, error = %e, body = %truncate(&body, 500), "search_stories JSON parse error");
+            None
+        }
+    }
 }
 
 /// Fetch a single HN item (story or comment) with its full comment tree by id.
@@ -115,8 +154,36 @@ pub async fn fetch_item(
     id: u64,
 ) -> Option<ItemResponse> {
     let url = format!("https://hn.algolia.com/api/v1/items/{}", id);
-    let resp = client.get(&url).send().await.ok()?;
-    resp.json::<ItemResponse>().await.ok()
+
+    let resp = match client.get(&url).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            warn!(%id, error = %e, "fetch_item HTTP error");
+            return None;
+        }
+    };
+
+    let status = resp.status();
+    let body = match resp.text().await {
+        Ok(b) => b,
+        Err(e) => {
+            warn!(%id, %status, error = %e, "fetch_item failed to read response body");
+            return None;
+        }
+    };
+
+    if !status.is_success() {
+        warn!(%id, %status, body = %truncate(&body, 500), "fetch_item non-success status");
+        return None;
+    }
+
+    match serde_json::from_str::<ItemResponse>(&body) {
+        Ok(item) => Some(item),
+        Err(e) => {
+            warn!(%id, %status, error = %e, body = %truncate(&body, 500), "fetch_item JSON parse error");
+            None
+        }
+    }
 }
 
 /// Return the first N top-level comments from an item response.

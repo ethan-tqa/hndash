@@ -245,7 +245,7 @@ impl SearchIndex {
             let sql = format!(
                 "SELECT p.id, p.hn_id, p.title, p.url, p.author, p.points, p.num_comments,
                         p.created_at, p.fetched_at, p.fetch_status, p.read_at,
-                        p.retry_count, p.error_message,
+                        p.retry_count, p.error_message, p.permanent_failure,
                         s.id, s.post_id, s.summary_type, s.content, s.model,
                         s.created_at
                  FROM posts p
@@ -272,16 +272,17 @@ impl SearchIndex {
                     read_at: row.get(10)?,
                     retry_count: row.get(11)?,
                     error_message: row.get(12)?,
+                    permanent_failure: row.get::<_, i64>(13)? != 0,
                 };
-                let s_id: Option<i64> = row.get(13)?;
+                let s_id: Option<i64> = row.get(14)?;
                 let summary = if s_id.is_some() {
                     Some(Summary {
                         id: s_id.unwrap(),
-                        post_id: row.get(14)?,
-                        summary_type: row.get(15)?,
-                        content: row.get(16)?,
-                        model: row.get(17)?,
-                        created_at: row.get(18)?,
+                        post_id: row.get(15)?,
+                        summary_type: row.get(16)?,
+                        content: row.get(17)?,
+                        model: row.get(18)?,
+                        created_at: row.get(19)?,
                     })
                 } else {
                     None

@@ -134,9 +134,12 @@
           <span>{{ ps.post.num_comments }} cmts</span>
         </span>
         <span class="post-meta-actions">
-          <span class="badge badge-{{ ps.post.fetch_status }}" {% if ps.post.error_message %}title="{{ ps.post.error_message }}"{% endif %}>{{ ps.post.fetch_status }}</span>
+          <span class="badge badge-{{ ps.post.fetch_status }}">{{ ps.post.fetch_status }}</span>
           {% if ps.post.fetch_status == "error" %}
           <button class="btn btn-sm btn-retry" style="background:#fce8e6;color:#c5221f;" onclick="event.stopPropagation();resummarize({{ ps.post.hn_id }})">Retry</button>
+          {% if ps.post.error_message %}
+          <span style="color:#c5221f;font-size:11px;margin-left:4px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:inline-block;vertical-align:middle;cursor:default;" title="{{ ps.post.error_message }}">{{ ps.post.error_message }}</span>
+          {% endif %}
           {% endif %}
           {% if not ps.post.read_at and ps.summaries %}
           <button class="btn btn-sm btn-mark-read" style="background:#f0f0e8;color:#333;" onclick="event.stopPropagation();markPostRead({{ ps.post.hn_id }})">

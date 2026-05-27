@@ -606,24 +606,27 @@ async fn process_import_queue(state: &AppState) {
                         Ok(id) => id,
                         Err(e) => {
                             error!(%hn_id, error = %e, "failed to insert imported post");
+                            with_db(&state.db, move |conn| {
+                                db::update_import_status(conn, hn_id, "error", Some(&format!("failed to insert post: {}", e))).ok();
+                            }).await;
                             return;
                         }
                     };
 
-                    let (ok, _summary_error) = fetch_and_summarize(
+                    let (ok, summary_error) = fetch_and_summarize(
                         state, hn_id, title, article_url,
                         &state.config.article, &state.config.llm,
                     )
                     .await;
 
-                    let error_msg: Option<&'static str> = if ok { None } else { Some("summarization failed") };
+                    let error_msg: Option<String> = if ok { None } else { Some(summary_error) };
                     let status_str: &'static str = if ok { "done" } else { "error" };
-                    let msg = error_msg.map(|s| s.to_string());
+                    let err_msg_for_status = error_msg.clone();
                     with_db(&state.db, move |conn| {
-                        db::update_fetch_status(conn, hn_id, status_str, msg.as_deref()).ok();
+                        db::update_fetch_status(conn, hn_id, status_str, err_msg_for_status.as_deref()).ok();
                     }).await;
 
-                    (status_str.to_string(), None::<String>)
+                    (status_str.to_string(), error_msg)
                 }
                 None => {
                     error!(%hn_id, "failed to fetch item from HN API");
@@ -711,6 +714,33 @@ async fn run_fetch_cycle(state: &AppState) {
     state.fetch_in_progress.store(false, Ordering::Release);
 }
 
+/// Check if an article URL is a permanent failure that should never be retried.
+fn is_permanent_failure(url: Option<&str>) -> bool {
+    let url = match url {
+        Some(u) => u,
+        None => return false,
+    };
+    let lower = url.to_lowercase();
+
+    // PDF files — can never be text-extracted by the article module
+    if lower.contains(".pdf") {
+        return true;
+    }
+
+    // YouTube URLs — SPA pages that never yield extractable text
+    if lower.contains("youtube.com") || lower.contains("youtu.be") {
+        return true;
+    }
+
+    // Known hard-paywalled sites that consistently return 403/401
+    let paywalled_domains = [
+        "wsj.com", "bloomberg.com", "nytimes.com", "economist.com",
+        "ft.com", "reuters.com", "newyorker.com", "washingtonpost.com",
+        "forbes.com", "barrons.com",
+    ];
+    paywalled_domains.iter().any(|domain| lower.contains(domain))
+}
+
 async fn process_post(state: &AppState, hit: &fetcher::SearchHit, hn_id: i64) {
     let config = &state.config;
     let title = hit.title.as_deref().unwrap_or("Untitled");
@@ -747,6 +777,7 @@ async fn process_post(state: &AppState, hit: &fetcher::SearchHit, hn_id: i64) {
     let (ok, error_msg) = fetch_and_summarize(state, hn_id, title, url, &config.article, &config.llm).await;
 
     let status: &'static str = if ok { "done" } else { "error" };
+    let perm_fail = !ok && is_permanent_failure(url);
     let error_msg_owned: Option<String> = if ok { None } else { Some(error_msg) };
     with_db(&state.db, move |conn| {
         if let Err(e) = db::update_fetch_status(conn, hn_id, status, error_msg_owned.as_deref()) {
@@ -754,6 +785,9 @@ async fn process_post(state: &AppState, hit: &fetcher::SearchHit, hn_id: i64) {
         }
         if !ok {
             let _ = db::increment_retry_count(conn, hn_id);
+            if perm_fail {
+                let _ = db::set_permanent_failure(conn, hn_id, MAX_RETRIES);
+            }
         }
     }).await;
 
@@ -776,6 +810,14 @@ async fn reprocess_post(state: &AppState, hn_id: i64) {
         }
     };
 
+    if is_permanent_failure(url.as_deref()) {
+        info!(%hn_id, "skipping reprocess, permanent failure");
+        with_db(&state.db, move |conn| {
+            let _ = db::set_permanent_failure(conn, hn_id, MAX_RETRIES);
+        }).await;
+        return;
+    }
+
     let (ok, error_msg) = fetch_and_summarize(state, hn_id, &title, url.as_deref(), &config.article, &config.llm).await;
 
     let status: &'static str = if ok { "done" } else { "error" };
@@ -786,6 +828,9 @@ async fn reprocess_post(state: &AppState, hn_id: i64) {
         }
         if !ok {
             let _ = db::increment_retry_count(conn, hn_id);
+            if is_permanent_failure(url.as_deref()) {
+                let _ = db::set_permanent_failure(conn, hn_id, MAX_RETRIES);
+            }
         }
     }).await;
 

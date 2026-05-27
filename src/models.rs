@@ -16,6 +16,8 @@ pub struct Post {
     pub read_at: Option<String>,
     pub retry_count: i64,
     pub error_message: Option<String>,
+    #[serde(default)]
+    pub permanent_failure: bool,
 }
 
 /// A generated summary for a post (post text, comments, or article).

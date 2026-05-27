@@ -58,6 +58,7 @@ pub fn init(path: &str) -> Result<Connection> {
 
     let _ = conn.execute("ALTER TABLE posts ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0", []);
     let _ = conn.execute("ALTER TABLE posts ADD COLUMN error_message TEXT", []);
+    let _ = conn.execute("ALTER TABLE posts ADD COLUMN permanent_failure INTEGER NOT NULL DEFAULT 0", []);
 
     Ok(conn)
 }
@@ -112,10 +113,19 @@ pub fn increment_retry_count(conn: &Connection, hn_id: i64) -> Result<i64> {
     Ok(new_count)
 }
 
-/// Return all posts with `fetch_status = 'error'` and retry_count below the limit.
+/// Mark a post as a permanent failure — it will not be retried.
+pub fn set_permanent_failure(conn: &Connection, hn_id: i64, max_retries: i64) -> Result<()> {
+    conn.execute(
+        "UPDATE posts SET permanent_failure = 1, retry_count = ?1 WHERE hn_id = ?2",
+        params![max_retries, hn_id],
+    )?;
+    Ok(())
+}
+
+/// Return all posts with `fetch_status = 'error'`, retry_count below the limit, and not permanently failed.
 pub fn get_errored_posts(conn: &Connection, max_retries: i64) -> Result<Vec<(i64, String, Option<String>)>> {
     let mut stmt = conn.prepare(
-        "SELECT hn_id, title, url FROM posts WHERE fetch_status = 'error' AND retry_count < ?1",
+        "SELECT hn_id, title, url FROM posts WHERE fetch_status = 'error' AND retry_count < ?1 AND permanent_failure = 0",
     )?;
     let rows = stmt.query_map(params![max_retries], |row| {
         Ok((
@@ -172,7 +182,7 @@ pub fn query_posts_with_summaries_paginated(
     let mut stmt = conn.prepare(
         "SELECT p.id, p.hn_id, p.title, p.url, p.author, p.points, p.num_comments,
                 p.created_at, p.fetched_at, p.fetch_status, p.read_at,
-                p.retry_count, p.error_message,
+                p.retry_count, p.error_message, p.permanent_failure,
                 s.id, s.post_id, s.summary_type, s.content, s.model,
                 s.created_at
          FROM (
@@ -200,16 +210,17 @@ pub fn query_posts_with_summaries_paginated(
             read_at: row.get(10)?,
             retry_count: row.get(11)?,
             error_message: row.get(12)?,
+            permanent_failure: row.get::<_, i64>(13)? != 0,
         };
-        let s_id: Option<i64> = row.get(13)?;
+        let s_id: Option<i64> = row.get(14)?;
         let summary = if s_id.is_some() {
             Some(Summary {
                 id: s_id.unwrap(),
-                post_id: row.get(14)?,
-                summary_type: row.get(15)?,
-                content: row.get(16)?,
-                model: row.get(17)?,
-                created_at: row.get(18)?,
+                post_id: row.get(15)?,
+                summary_type: row.get(16)?,
+                content: row.get(17)?,
+                model: row.get(18)?,
+                created_at: row.get(19)?,
             })
         } else {
             None

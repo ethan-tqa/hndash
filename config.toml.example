@@ -18,7 +18,7 @@ port = 8080
 path = "hndash.db"
 
 [article]
-fallback_order = ["archive.is", "web.archive.org"]
+fallback_order = ["jina_reader", "web.archive.org", "archive.is"]
 timeout_secs = 30
 max_bytes = 204800
 min_text_length = 100

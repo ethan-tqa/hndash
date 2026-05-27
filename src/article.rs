@@ -6,8 +6,8 @@ use tracing::warn;
 
 use crate::models::ArticleConfig;
 
-/// Fetch an article URL and extract readable text, falling back through archive.is
-/// and the Wayback Machine as configured in `ArticleConfig::fallback_order`.
+/// Fetch an article URL and extract readable text, falling through configured
+/// fallbacks (Jina Reader, Wayback Machine, archive.is, etc.).
 pub async fn fetch_article(config: &ArticleConfig, url: &str) -> Option<String> {
     let client = Client::builder()
         .timeout(Duration::from_secs(config.timeout_secs))
@@ -28,15 +28,23 @@ pub async fn fetch_article(config: &ArticleConfig, url: &str) -> Option<String> 
         );
     }
 
-    for fallback in &config.fallback_order {
+    for (i, fallback) in config.fallback_order.iter().enumerate() {
+        if i > 0 {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
         match fallback.as_str() {
-            "archive.is" => {
-                if let Some(text) = try_archive_is(&client, url, config).await {
+            "jina_reader" => {
+                if let Some(text) = try_jina_reader(&client, url, config).await {
                     return Some(text);
                 }
             }
             "web.archive.org" => {
                 if let Some(text) = try_wayback(&client, url, config).await {
+                    return Some(text);
+                }
+            }
+            "archive.is" => {
+                if let Some(text) = try_archive_is(&client, url, config).await {
                     return Some(text);
                 }
             }
@@ -88,24 +96,33 @@ async fn try_archive_is(client: &Client, url: &str, config: &ArticleConfig) -> O
     let encoded = urlencoding::encode(url);
     let archive_url = format!("https://archive.is/newest/{}", encoded);
 
-    let response = client
-        .get(&archive_url)
-        .header("User-Agent", &config.user_agent)
-        .send()
-        .await
-        .ok()?;
+    for attempt in 0..2 {
+        let response = client
+            .get(&archive_url)
+            .header("User-Agent", &config.user_agent)
+            .send()
+            .await
+            .ok()?;
 
-    let status = response.status();
-    if !status.is_success() {
-        warn!(%url, %status, "archive.is non-success");
-        return None;
-    }
+        let status = response.status();
+        if status == 429 {
+            warn!(%url, attempt, "archive.is rate limited, retrying after delay");
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            continue;
+        }
+        if !status.is_success() {
+            warn!(%url, %status, "archive.is non-success");
+            return None;
+        }
 
-    let body = response.bytes().await.ok()?;
-    let html = String::from_utf8_lossy(&body).to_string();
-    let text = extract_text(&html);
+        let body = response.bytes().await.ok()?;
+        let html = String::from_utf8_lossy(&body).to_string();
+        let text = extract_text(&html);
 
-    if text.len() < 200 {
+        if text.len() >= 200 {
+            return Some(text);
+        }
+
         let snippet: String = html.chars().take(500).collect();
         warn!(%url, extracted = text.len(), html_len = html.len(),
             snippet = %snippet,
@@ -114,30 +131,72 @@ async fn try_archive_is(client: &Client, url: &str, config: &ArticleConfig) -> O
         return None;
     }
 
-    Some(text)
+    None
 }
 
 async fn try_wayback(client: &Client, url: &str, config: &ArticleConfig) -> Option<String> {
     let cdx_url = format!(
-        "https://web.archive.org/cdx/search/cdx?url={}&output=json&limit=1&fl=timestamp",
+        "https://web.archive.org/cdx/search/cdx?url={}&output=json&limit=3&fl=timestamp,statuscode",
         urlencoding::encode(url)
     );
 
     let resp = client.get(&cdx_url).send().await.ok()?;
     let rows: Vec<Vec<String>> = resp.json().await.ok()?;
 
-    let timestamp = rows.get(1)?.first()?.clone();
-    let snapshot_url = format!("https://web.archive.org/web/{}/{}", timestamp, url);
+    for i in 1..rows.len() {
+        let timestamp = rows.get(i)?.first()?.clone();
+        let status_code = rows.get(i)?.get(1).cloned();
 
-    let html = fetch_url(client, &snapshot_url, config.max_bytes).await?;
-    let text = extract_text(&html);
+        // Skip snapshots that returned errors
+        if let Some(code) = &status_code {
+            if code.starts_with('4') || code.starts_with('5') {
+                continue;
+            }
+        }
+
+        // Use id_ modifier to get raw content without Wayback banner
+        let snapshot_url = format!("https://web.archive.org/web/{}id_/{}", timestamp, url);
+
+        let html = fetch_url(client, &snapshot_url, config.max_bytes).await?;
+        let text = extract_text(&html);
+
+        if text.len() < config.min_text_length {
+            continue;
+        }
+
+        // Check we didn't get a Wayback error page
+        if text.len() < 300 && text.contains("Wayback Machine") {
+            continue;
+        }
+
+        return Some(text);
+    }
+
+    None
+}
+
+async fn try_jina_reader(client: &Client, url: &str, config: &ArticleConfig) -> Option<String> {
+    let reader_url = format!("https://r.jina.ai/{}", url);
+
+    let response = client
+        .get(&reader_url)
+        .header("Accept", "text/plain, text/markdown, text/html")
+        .header("User-Agent", &config.user_agent)
+        .send()
+        .await
+        .ok()?;
+
+    let status = response.status();
+    if !status.is_success() {
+        warn!(%url, %status, "jina reader non-success");
+        return None;
+    }
+
+    let body = response.bytes().await.ok()?;
+    let text = String::from_utf8_lossy(&body).to_string();
 
     if text.len() < config.min_text_length {
-        let snippet: String = html.chars().take(500).collect();
-        warn!(%url, extracted = text.len(), html_len = html.len(),
-            snippet = %snippet,
-            "wayback text too short"
-        );
+        warn!(%url, len = text.len(), "jina reader text too short");
         return None;
     }
 
@@ -174,6 +233,20 @@ fn extract_text(html: &str) -> String {
                 if let Some(tag) = node.as_tag() {
                     collect_node_text(parser, tag, &mut text);
                     text.push('\n');
+                }
+            }
+        }
+        if !text.trim().is_empty() {
+            return collapse_whitespace(&text);
+        }
+        text.clear();
+    }
+
+    if let Some(iter) = dom.query_selector("body") {
+        for handle in iter {
+            if let Some(node) = handle.get(parser) {
+                if let Some(tag) = node.as_tag() {
+                    collect_node_text(parser, tag, &mut text);
                 }
             }
         }

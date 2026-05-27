@@ -9,6 +9,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+const MAX_RETRIES: i64 = 3;
+
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse};
@@ -186,7 +188,7 @@ async fn resummarize(
             return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to delete summaries")
                 .into_response();
         }
-        if let Err(e) = db::update_fetch_status(&conn, hn_id, "pending") {
+        if let Err(e) = db::update_fetch_status(&conn, hn_id, "pending", None) {
             error!(%hn_id, error = %e, "failed to set pending status");
         }
     }
@@ -311,6 +313,11 @@ async fn run_fetch_cycle(state: &AppState) {
     let now_str = ts_to_iso(now_secs as i64);
     *state.last_fetch_time.lock().expect("last_fetch lock") = Some(now_str);
 
+    let retried = retry_errored_posts(state).await;
+    if retried > 0 {
+        info!(retried, "retried errored posts");
+    }
+
     info!(new_posts, "Fetch cycle complete");
     state.fetch_in_progress.store(false, Ordering::Release);
 }
@@ -333,7 +340,7 @@ async fn process_post(state: &AppState, hit: &fetcher::SearchHit, hn_id: i64) {
         match db::upsert_post(&conn, hn_id, title, url, author, points, num_comments, &created_at)
         {
             Ok(id) => {
-                if let Err(e) = db::update_fetch_status(&conn, hn_id, "pending") {
+                if let Err(e) = db::update_fetch_status(&conn, hn_id, "pending", None) {
                     error!(%hn_id, error = %e, "failed to set pending status");
                 }
                 id
@@ -345,13 +352,17 @@ async fn process_post(state: &AppState, hit: &fetcher::SearchHit, hn_id: i64) {
         }
     };
 
-    let ok = fetch_and_summarize(state, post_id, hn_id, title, url, &config.article, &config.llm).await;
+    let (ok, error_msg) = fetch_and_summarize(state, post_id, hn_id, title, url, &config.article, &config.llm).await;
 
     {
         let conn = state.db.lock().expect("db lock");
         let status = if ok { "done" } else { "error" };
-        if let Err(e) = db::update_fetch_status(&conn, hn_id, status) {
+        let error_msg = if ok { None } else { Some(error_msg.as_str()) };
+        if let Err(e) = db::update_fetch_status(&conn, hn_id, status, error_msg) {
             error!(%hn_id, error = %e, "failed to set {} status", status);
+        }
+        if !ok {
+            let _ = db::increment_retry_count(&conn, hn_id);
         }
     }
 
@@ -381,13 +392,17 @@ async fn reprocess_post(state: &AppState, hn_id: i64) {
         }
     };
 
-    let ok = fetch_and_summarize(state, post_id, hn_id, &title, url.as_deref(), &config.article, &config.llm).await;
+    let (ok, error_msg) = fetch_and_summarize(state, post_id, hn_id, &title, url.as_deref(), &config.article, &config.llm).await;
 
     {
         let conn = state.db.lock().expect("db lock");
         let status = if ok { "done" } else { "error" };
-        if let Err(e) = db::update_fetch_status(&conn, hn_id, status) {
+        let error_msg = if ok { None } else { Some(error_msg.as_str()) };
+        if let Err(e) = db::update_fetch_status(&conn, hn_id, status, error_msg) {
             error!(%hn_id, error = %e, "failed to set {} status", status);
+        }
+        if !ok {
+            let _ = db::increment_retry_count(&conn, hn_id);
         }
     }
 
@@ -427,7 +442,7 @@ async fn recover_pending_posts(state: &AppState) {
         };
 
         info!(%hn_id, "recovering pending post");
-        let ok = fetch_and_summarize(
+        let (ok, error_msg) = fetch_and_summarize(
             state,
             post_id,
             hn_id,
@@ -441,8 +456,12 @@ async fn recover_pending_posts(state: &AppState) {
         {
             let conn = state.db.lock().expect("db lock");
             let status = if ok { "done" } else { "error" };
-            if let Err(e) = db::update_fetch_status(&conn, hn_id, status) {
+            let error_msg = if ok { None } else { Some(error_msg.as_str()) };
+            if let Err(e) = db::update_fetch_status(&conn, hn_id, status, error_msg) {
                 error!(%hn_id, error = %e, "failed to set recovery status");
+            }
+            if !ok {
+                let _ = db::increment_retry_count(&conn, hn_id);
             }
         }
 
@@ -452,9 +471,74 @@ async fn recover_pending_posts(state: &AppState) {
     info!("pending post recovery complete");
 }
 
-/// Returns `true` if all critical steps succeeded (post summary, comments summary,
-/// article summary). A `false` return means at least one summarization failed and the
-/// post should be marked as `error`.
+/// Retry posts that previously ended in `error` status, up to `MAX_RETRIES` times.
+/// Returns the number of posts retried.
+async fn retry_errored_posts(state: &AppState) -> usize {
+    let errored = {
+        let conn = state.db.lock().expect("db lock");
+        db::get_errored_posts(&conn, MAX_RETRIES).unwrap_or_default()
+    };
+
+    if errored.is_empty() {
+        return 0;
+    }
+
+    info!(count = errored.len(), "retrying errored posts");
+
+    for (hn_id, title, url) in &errored {
+        let (post_id, current_retry_count) = {
+            let conn = state.db.lock().expect("db lock");
+            let mut stmt = match conn.prepare("SELECT id, retry_count FROM posts WHERE hn_id = ?1") {
+                Ok(s) => s,
+                Err(e) => {
+                    error!(%hn_id, error = %e, "failed to query post for retry");
+                    continue;
+                }
+            };
+            match stmt.query_row(rusqlite::params![hn_id], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+            }) {
+                Ok((id, rc)) => (id, rc),
+                Err(e) => {
+                    error!(%hn_id, error = %e, "post not found for retry");
+                    continue;
+                }
+            }
+        };
+
+        info!(%hn_id, title, attempt = current_retry_count + 1, max = MAX_RETRIES, "retrying errored post");
+
+        let (ok, error_msg) = fetch_and_summarize(
+            state,
+            post_id,
+            *hn_id,
+            title,
+            url.as_deref(),
+            &state.config.article,
+            &state.config.llm,
+        )
+        .await;
+
+        {
+            let conn = state.db.lock().expect("db lock");
+            let status = if ok { "done" } else { "error" };
+            let error_msg = if ok { None } else { Some(error_msg.as_str()) };
+            if let Err(e) = db::update_fetch_status(&conn, *hn_id, status, error_msg) {
+                error!(%hn_id, error = %e, "failed to set retry status");
+            }
+            if !ok {
+                let _ = db::increment_retry_count(&conn, *hn_id);
+            }
+        }
+
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+
+    errored.len()
+}
+
+/// Returns `(success, error_message)`. A `false` success means at least one step failed;
+/// the error message describes which steps failed.
 async fn fetch_and_summarize(
     state: &AppState,
     post_id: i64,
@@ -463,7 +547,7 @@ async fn fetch_and_summarize(
     url: Option<&str>,
     article_config: &crate::models::ArticleConfig,
     llm_config: &crate::models::LlmConfig,
-) -> bool {
+) -> (bool, String) {
     let item = fetcher::fetch_item(&state.http_client, hn_id as u64).await;
 
     let comments_text = item.as_ref().map(|item| {
@@ -546,6 +630,7 @@ async fn fetch_and_summarize(
          (article_result, article_attempted)) = tokio::join!(post_fut, comments_fut, article_fut);
 
     let mut ok = true;
+    let mut errors: Vec<&str> = Vec::new();
 
     if let Some(ref summary) = post_result {
         let conn = state.db.lock().expect("db lock");
@@ -555,6 +640,7 @@ async fn fetch_and_summarize(
     } else if post_attempted {
         error!(%hn_id, "post story text summary failed");
         ok = false;
+        errors.push("post text summary failed");
     }
 
     if let Some(ref summary) = comments_result {
@@ -565,6 +651,7 @@ async fn fetch_and_summarize(
     } else if comments_attempted {
         error!(%hn_id, "comments summary failed");
         ok = false;
+        errors.push("comments summary failed");
     }
 
     if let Some(ref summary) = article_result {
@@ -575,9 +662,11 @@ async fn fetch_and_summarize(
     } else if article_attempted {
         error!(%hn_id, "article summary failed");
         ok = false;
+        errors.push("article summary failed");
     }
 
-    ok
+    let error_msg = errors.join("; ");
+    (ok, error_msg)
 }
 
 fn ts_to_iso(ts: i64) -> String {

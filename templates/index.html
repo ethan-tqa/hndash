@@ -108,7 +108,10 @@
           <span>{{ ps.post.num_comments }} cmts</span>
         </span>
         <span class="post-meta-actions">
-          <span class="badge badge-{{ ps.post.fetch_status }}">{{ ps.post.fetch_status }}</span>
+          <span class="badge badge-{{ ps.post.fetch_status }}" {% if ps.post.error_message %}title="{{ ps.post.error_message }}"{% endif %}>{{ ps.post.fetch_status }}</span>
+          {% if ps.post.fetch_status == "error" %}
+          <button class="btn btn-sm btn-retry" style="background:#fce8e6;color:#c5221f;" onclick="event.stopPropagation();resummarize({{ ps.post.hn_id }})">Retry</button>
+          {% endif %}
           {% if not ps.post.read_at and ps.summaries %}
           <button class="btn btn-sm btn-mark-read" style="background:#f0f0e8;color:#333;" onclick="event.stopPropagation();markPostRead({{ ps.post.hn_id }})">
             <svg class="btn-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>

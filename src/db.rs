@@ -9,6 +9,10 @@ pub fn init(path: &str) -> Result<Connection> {
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
 
     conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS _migrations (id INTEGER PRIMARY KEY);",
+    )?;
+
+    conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS posts (
             id            INTEGER PRIMARY KEY,
             hn_id         INTEGER UNIQUE NOT NULL,
@@ -21,7 +25,9 @@ pub fn init(path: &str) -> Result<Connection> {
             fetched_at    TEXT NOT NULL DEFAULT (datetime('now')),
             fetch_status  TEXT NOT NULL DEFAULT 'pending'
                             CHECK(fetch_status IN ('pending','done','error')),
-            read_at       TEXT
+            read_at       TEXT,
+            retry_count   INTEGER NOT NULL DEFAULT 0,
+            error_message TEXT
         );
 
         CREATE TABLE IF NOT EXISTS summaries (
@@ -37,6 +43,9 @@ pub fn init(path: &str) -> Result<Connection> {
         CREATE INDEX IF NOT EXISTS idx_posts_hn_id ON posts(hn_id);
         CREATE INDEX IF NOT EXISTS idx_summaries_post ON summaries(post_id);",
     )?;
+
+    let _ = conn.execute("ALTER TABLE posts ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0", []);
+    let _ = conn.execute("ALTER TABLE posts ADD COLUMN error_message TEXT", []);
 
     Ok(conn)
 }
@@ -68,12 +77,46 @@ pub fn upsert_post(
 }
 
 /// Set the `fetch_status` column for a post (`pending` | `done` | `error`).
-pub fn update_fetch_status(conn: &Connection, hn_id: i64, status: &str) -> Result<()> {
+/// If `error_message` is provided, it is saved (cleared when status is `done`).
+pub fn update_fetch_status(conn: &Connection, hn_id: i64, status: &str, error_message: Option<&str>) -> Result<()> {
     conn.execute(
-        "UPDATE posts SET fetch_status = ?1 WHERE hn_id = ?2",
-        params![status, hn_id],
+        "UPDATE posts SET fetch_status = ?1, error_message = ?2 WHERE hn_id = ?3",
+        params![status, error_message, hn_id],
     )?;
     Ok(())
+}
+
+/// Increment the retry counter for a post.
+pub fn increment_retry_count(conn: &Connection, hn_id: i64) -> Result<i64> {
+    conn.execute(
+        "UPDATE posts SET retry_count = retry_count + 1 WHERE hn_id = ?1",
+        params![hn_id],
+    )?;
+    let new_count: i64 = conn.query_row(
+        "SELECT retry_count FROM posts WHERE hn_id = ?1",
+        params![hn_id],
+        |row| row.get(0),
+    )?;
+    Ok(new_count)
+}
+
+/// Return all posts with `fetch_status = 'error'` and retry_count below the limit.
+pub fn get_errored_posts(conn: &Connection, max_retries: i64) -> Result<Vec<(i64, String, Option<String>)>> {
+    let mut stmt = conn.prepare(
+        "SELECT hn_id, title, url FROM posts WHERE fetch_status = 'error' AND retry_count < ?1",
+    )?;
+    let rows = stmt.query_map(params![max_retries], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, Option<String>>(2)?,
+        ))
+    })?;
+    let mut posts = Vec::new();
+    for row in rows {
+        posts.push(row?);
+    }
+    Ok(posts)
 }
 
 /// Look up a post by its HN story id. Returns `(internal_id, fetch_status)` if found.
@@ -107,6 +150,7 @@ pub fn query_posts_with_summaries(conn: &Connection) -> Result<Vec<PostSummary>>
     let mut stmt = conn.prepare(
         "SELECT p.id, p.hn_id, p.title, p.url, p.author, p.points, p.num_comments,
                 p.created_at, p.fetched_at, p.fetch_status, p.read_at,
+                p.retry_count, p.error_message,
                 s.id, s.post_id, s.summary_type, s.content, s.model,
                 s.created_at
          FROM posts p
@@ -127,16 +171,18 @@ pub fn query_posts_with_summaries(conn: &Connection) -> Result<Vec<PostSummary>>
             fetched_at: row.get(8)?,
             fetch_status: row.get(9)?,
             read_at: row.get(10)?,
+            retry_count: row.get(11)?,
+            error_message: row.get(12)?,
         };
-        let s_id: Option<i64> = row.get(11)?;
+        let s_id: Option<i64> = row.get(13)?;
         let summary = if s_id.is_some() {
             Some(Summary {
                 id: s_id.unwrap(),
-                post_id: row.get(12)?,
-                summary_type: row.get(13)?,
-                content: row.get(14)?,
-                model: row.get(15)?,
-                created_at: row.get(16)?,
+                post_id: row.get(14)?,
+                summary_type: row.get(15)?,
+                content: row.get(16)?,
+                model: row.get(17)?,
+                created_at: row.get(18)?,
             })
         } else {
             None

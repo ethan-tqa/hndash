@@ -136,7 +136,8 @@ async fn chat_completion(
     };
 
     let log_content = if user_content.len() > 500 {
-        format!("{}... (truncated)", &user_content[..500])
+        let end = user_content.floor_char_boundary(500);
+        format!("{}... (truncated)", &user_content[..end])
     } else {
         user_content.to_string()
     };

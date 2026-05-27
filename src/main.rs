@@ -438,7 +438,14 @@ async fn process_import_queue(state: &AppState) {
                     let title = item.title.as_deref().unwrap_or("Untitled");
                     let author = item.author.as_deref().unwrap_or("unknown");
                     let points = item.points.unwrap_or(0) as i64;
-                    let num_comments = item.num_comments.unwrap_or(0) as i64;
+                    fn count_comments(children: &[fetcher::Comment]) -> i64 {
+                        let mut count = 0i64;
+                        for child in children {
+                            count += 1 + count_comments(&child.children);
+                        }
+                        count
+                    }
+                    let num_comments = count_comments(&item.children);
                     let created_at = item
                         .created_at
                         .as_deref()

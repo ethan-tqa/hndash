@@ -69,6 +69,27 @@ async fn main() {
         .with(file_layer)
         .init();
 
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let msg = match info.payload().downcast_ref::<&str>() {
+            Some(s) => s.to_string(),
+            None => match info.payload().downcast_ref::<String>() {
+                Some(s) => s.clone(),
+                None => "unknown".to_string(),
+            },
+        };
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}", l.file(), l.line()))
+            .unwrap_or_else(|| "?".to_string());
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        tracing::error!(
+            target: "panic",
+            "PANIC at {location}\n{msg}\n\nBacktrace:\n{backtrace}",
+        );
+        prev(info);
+    }));
+
     let cfg = config::load_config();
 
     config::validate_api_key(&cfg).await;

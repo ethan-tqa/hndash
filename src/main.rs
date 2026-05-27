@@ -11,7 +11,9 @@ use std::time::Duration;
 
 const MAX_RETRIES: i64 = 3;
 
-use axum::extract::{Path, State};
+use std::collections::HashMap;
+
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse};
 use axum::routing::{get, post};
@@ -122,16 +124,36 @@ async fn shutdown_signal() {
 
 // ── Route handlers ──────────────────────────────────────────
 
-async fn dashboard(state: State<AppStateRef>) -> impl IntoResponse {
-    let posts = {
+async fn dashboard(
+    state: State<AppStateRef>,
+    Query(params): Query<HashMap<String, String>>,
+) -> impl IntoResponse {
+    let page: i64 = params
+        .get("page")
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(1)
+        .max(1);
+    let per_page: i64 = 20;
+
+    let (posts, total_posts) = {
         let conn = state.db.lock().expect("db lock");
-        db::query_posts_with_summaries(&conn).unwrap_or_default()
+        let total = db::count_posts(&conn).unwrap_or(0);
+        let posts =
+            db::query_posts_with_summaries_paginated(&conn, page, per_page).unwrap_or_default();
+        (posts, total)
     };
+
+    let total_pages = (total_posts + per_page - 1) / per_page;
+    let page_range: Vec<i64> = (1..=total_pages.max(1)).collect();
 
     let last_fetch_time = state.last_fetch_time.lock().expect("last_fetch lock").clone();
 
     let ctx = serde_json::json!({
         "posts": posts,
+        "page": page,
+        "total_pages": total_pages,
+        "total_posts": total_posts,
+        "page_range": page_range,
         "last_fetch_time": last_fetch_time,
     });
 

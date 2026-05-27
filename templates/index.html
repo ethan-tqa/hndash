@@ -43,6 +43,13 @@
   .refresh-spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid rgba(255,255,255,.3); border-top-color: #fff; border-radius: 50%; animation: spin .6s linear infinite; vertical-align: middle; }
   @keyframes spin { to { transform: rotate(360deg); } }
 
+  .pagination { display: flex; align-items: center; justify-content: center; gap: 6px; margin-top: 20px; flex-wrap: wrap; }
+  .page-btn { display: inline-flex; align-items: center; justify-content: center; min-width: 32px; height: 32px; padding: 0 8px; border: 1px solid #d0d0c8; border-radius: 3px; background: #fff; color: #444; font-size: 13px; text-decoration: none; cursor: pointer; }
+  .page-btn:hover { background: #f0f0e8; }
+  .page-active { background: #ff6600; border-color: #ff6600; color: #fff; font-weight: 600; }
+  .page-active:hover { background: #e55c00; }
+  .page-disabled { opacity: .4; pointer-events: none; }
+
   @media (max-width: 600px) {
     body { padding: 8px; }
     .header { flex-wrap: wrap; gap: 8px; }
@@ -150,6 +157,14 @@
   {% else %}
   <p style="text-align:center;color:#888;margin-top:60px;">No posts yet. Click <strong>Refresh</strong> to fetch stories.</p>
   {% endfor %}
+
+  <div class="pagination">
+    <a class="page-btn {% if page <= 1 %}page-disabled{% endif %}" href="/?page={{ page - 1 }}">Prev</a>
+    {% for p in page_range %}
+    <a class="page-btn {% if p == page %}page-active{% endif %}" href="/?page={{ p }}">{{ p }}</a>
+    {% endfor %}
+    <a class="page-btn {% if page >= total_pages %}page-disabled{% endif %}" href="/?page={{ page + 1 }}">Next</a>
+  </div>
 </div>
 
 <script>

@@ -145,20 +145,35 @@ pub fn insert_summary(
     Ok(())
 }
 
-/// Fetch all posts with their associated summaries, ordered by creation time descending.
-pub fn query_posts_with_summaries(conn: &Connection) -> Result<Vec<PostSummary>> {
+/// Count total posts in the database.
+pub fn count_posts(conn: &Connection) -> Result<i64> {
+    conn.query_row("SELECT COUNT(*) FROM posts", [], |row| row.get(0))
+}
+
+/// Fetch a page of posts with their associated summaries, ordered by creation time descending.
+pub fn query_posts_with_summaries_paginated(
+    conn: &Connection,
+    page: i64,
+    per_page: i64,
+) -> Result<Vec<PostSummary>> {
+    let offset = (page - 1).max(0) * per_page;
     let mut stmt = conn.prepare(
         "SELECT p.id, p.hn_id, p.title, p.url, p.author, p.points, p.num_comments,
                 p.created_at, p.fetched_at, p.fetch_status, p.read_at,
                 p.retry_count, p.error_message,
                 s.id, s.post_id, s.summary_type, s.content, s.model,
                 s.created_at
-         FROM posts p
+         FROM (
+             SELECT id FROM posts
+             ORDER BY created_at DESC
+             LIMIT ?1 OFFSET ?2
+         ) AS page
+         JOIN posts p ON p.id = page.id
          LEFT JOIN summaries s ON s.post_id = p.id
          ORDER BY p.created_at DESC",
     )?;
 
-    let rows = stmt.query_map([], |row| {
+    let rows = stmt.query_map(params![per_page, offset], |row| {
         let post = Post {
             id: row.get(0)?,
             hn_id: row.get(1)?,

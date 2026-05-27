@@ -15,7 +15,7 @@ use std::collections::HashMap;
 
 use axum::extract::{Form, Path, Query, State};
 use axum::http::StatusCode;
-use axum::response::{Html, IntoResponse};
+use axum::response::{Html, IntoResponse, Redirect};
 use axum::routing::{get, post};
 use axum::Router;
 use rusqlite::Connection;
@@ -87,6 +87,7 @@ async fn main() {
     templates
         .add_template_owned("index.html", index_content)
         .expect("Failed to add template");
+    templates.add_filter("urlencode", |s: &str| urlencoding::encode(s).to_string());
     templates
         .add_template_owned("import.html", import_content)
         .expect("Failed to add import template");
@@ -108,14 +109,17 @@ async fn main() {
         .route("/mark-read-all", post(mark_all_read))
         .route("/remove-all-posts", post(remove_all_posts))
         .route("/remove-post/{hn_id}", post(remove_post))
+        .route("/search", get(search))
         .route("/import", get(import_page).post(import_submit))
         .with_state(state.clone());
 
     let addr = format!("{}:{}", state.config.server.host, state.config.server.port);
-    info!("Listening on {}", addr);
 
     // Recover any posts left in "pending" from a previous crash
-    recover_pending_posts(&state).await;
+    let state_clone = state.clone();
+    tokio::spawn(async move {
+        recover_pending_posts(&state_clone).await;
+    });
 
     // Recover any import queue items stuck in "processing" from a previous crash
     let pending_imports = with_db(&state.db, |conn| db::reset_stuck_imports(conn).unwrap_or(0)).await;
@@ -127,9 +131,19 @@ async fn main() {
         });
     }
 
+    // Rebuild FTS5 search index in background
+    let state_clone = state.clone();
+    tokio::spawn(async move {
+        info!("rebuilding FTS search index");
+        with_db(&state_clone.db, |conn| db::rebuild_search_index(conn)).await.unwrap_or_else(|e| {
+            warn!(error = %e, "FTS rebuild failed (non-fatal)");
+        });
+    });
+
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .expect("Failed to bind");
+    info!("Listening on {}", addr);
 
     // Start fetch cycle after server is bound (design decision #6)
     let state_clone = state.clone();
@@ -195,6 +209,7 @@ async fn dashboard(
         "total_posts": total_posts,
         "page_range": page_range,
         "last_fetch_time": last_fetch_time,
+        "query": "",
     });
 
     match state.templates.get_template("index.html") {
@@ -291,7 +306,10 @@ async fn mark_all_read(state: State<AppStateRef>) -> impl IntoResponse {
 }
 
 async fn remove_all_posts(state: State<AppStateRef>) -> impl IntoResponse {
-    match with_db(&state.db, |conn| db::delete_all_posts(conn)).await {
+    match with_db(&state.db, |conn| {
+        db::clear_search_index(conn)?;
+        db::delete_all_posts(conn)
+    }).await {
         Ok(_) => (StatusCode::OK, "All posts removed").into_response(),
         Err(e) => {
             error!(error = %e, "failed to remove all posts");
@@ -304,7 +322,15 @@ async fn remove_post(
     state: State<AppStateRef>,
     Path(hn_id): Path<i64>,
 ) -> impl IntoResponse {
-    match with_db(&state.db, move |conn| db::delete_post(conn, hn_id)).await {
+    match with_db(&state.db, move |conn| {
+        let post_id: Option<i64> = conn
+            .query_row("SELECT id FROM posts WHERE hn_id = ?1", rusqlite::params![hn_id], |row| row.get(0))
+            .ok();
+        if let Some(pid) = post_id {
+            db::remove_from_search_index(conn, pid)?;
+        }
+        db::delete_post(conn, hn_id)
+    }).await {
         Ok(_) => (StatusCode::OK, "Post removed").into_response(),
         Err(e) => {
             error!(%hn_id, error = %e, "failed to remove post");
@@ -408,6 +434,62 @@ async fn import_submit(
     }
 }
 
+// ── Search ──────────────────────────────────────────────────
+
+async fn search(
+    state: State<AppStateRef>,
+    Query(params): Query<HashMap<String, String>>,
+) -> impl IntoResponse {
+    let query = params.get("q").map(|s| s.as_str()).unwrap_or("").trim().to_string();
+    if query.is_empty() {
+        return Redirect::to("/").into_response();
+    }
+
+    let page: i64 = params
+        .get("page")
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(1)
+        .max(1);
+    let per_page: i64 = 20;
+
+    let query_in_closure = query.clone();
+    let (posts, total_posts) = match with_db(&state.db, move |conn| {
+        db::search_posts(conn, &query_in_closure, page, per_page)
+    }).await {
+        Ok(result) => result,
+        Err(e) => {
+            error!(error = %e, query = %query, "search failed");
+            (Vec::new(), 0i64)
+        }
+    };
+
+    let total_pages = (total_posts + per_page - 1) / per_page;
+    let page_range: Vec<i64> = (1..=total_pages.max(1)).collect();
+
+    let ctx = serde_json::json!({
+        "posts": posts,
+        "page": page,
+        "total_pages": total_pages,
+        "total_posts": total_posts,
+        "page_range": page_range,
+        "query": query,
+    });
+
+    match state.templates.get_template("index.html") {
+        Ok(tmpl) => match tmpl.render(ctx) {
+            Ok(html) => Html(html).into_response(),
+            Err(e) => {
+                error!(error = %e, "template render failed");
+                (StatusCode::INTERNAL_SERVER_ERROR, "Template error").into_response()
+            }
+        },
+        Err(e) => {
+            error!(error = %e, "template not found");
+            (StatusCode::INTERNAL_SERVER_ERROR, "Template error").into_response()
+        }
+    }
+}
+
 async fn process_import_queue(state: &AppState) {
     loop {
         let item = with_db(&state.db, |conn| db::claim_next_import(conn).unwrap_or(None)).await;
@@ -459,14 +541,13 @@ async fn process_import_queue(state: &AppState) {
                     let article_url_owned = article_url.map(|s| s.to_string());
 
                     let _post_id = match with_db(&state.db, move |conn| {
-                        db::upsert_post(
+                        let id = db::upsert_post(
                             conn, hn_id, &title_owned, article_url_owned.as_deref(),
                             &author_owned, points, num_comments, &created_at,
-                        )
-                        .map(|id| {
-                            let _ = db::update_fetch_status(conn, hn_id, "pending", None);
-                            id
-                        })
+                        )?;
+                        db::upsert_search_index(conn, id)?;
+                        let _ = db::update_fetch_status(conn, hn_id, "pending", None);
+                        Ok::<_, rusqlite::Error>(id)
                     }).await {
                         Ok(id) => id,
                         Err(e) => {
@@ -594,13 +675,12 @@ async fn process_post(state: &AppState, hit: &fetcher::SearchHit, hn_id: i64) {
     let url_owned = url.map(|s| s.to_string());
 
     let _post_id = match with_db(&state.db, move |conn| {
-        db::upsert_post(conn, hn_id, &title_owned, url_owned.as_deref(), &author_owned, points, num_comments, &created_at)
-            .map(|id| {
-                if let Err(e) = db::update_fetch_status(conn, hn_id, "pending", None) {
-                    error!(%hn_id, error = %e, "failed to set pending status");
-                }
-                id
-            })
+        let id = db::upsert_post(conn, hn_id, &title_owned, url_owned.as_deref(), &author_owned, points, num_comments, &created_at)?;
+        db::upsert_search_index(conn, id)?;
+        if let Err(e) = db::update_fetch_status(conn, hn_id, "pending", None) {
+            error!(%hn_id, error = %e, "failed to set pending status");
+        }
+        Ok::<_, rusqlite::Error>(id)
     }).await {
         Ok(id) => id,
         Err(e) => {
@@ -867,13 +947,14 @@ async fn fetch_and_summarize(
         let summary_owned = summary.clone();
         let model = model.clone();
         with_db(&state.db, move |conn| {
-            if let Ok(Some((current_id, _))) = db::get_post_by_hn_id(conn, hn_id) {
-                if let Err(e) = db::insert_summary(conn, current_id, "post", &summary_owned, &model) {
-                    error!(%hn_id, error = %e, "failed to insert post summary");
-                }
-            }
-        }).await;
-    } else if post_attempted {
+                    if let Ok(Some((current_id, _))) = db::get_post_by_hn_id(conn, hn_id) {
+                        if let Err(e) = db::insert_summary(conn, current_id, "post", &summary_owned, &model) {
+                            error!(%hn_id, error = %e, "failed to insert post summary");
+                        }
+                        db::upsert_search_index(conn, current_id).ok();
+                    }
+                }).await;
+            } else if post_attempted {
         error!(%hn_id, "post story text summary failed");
         ok = false;
         errors.push("post text summary failed");
@@ -883,13 +964,14 @@ async fn fetch_and_summarize(
         let summary_owned = summary.clone();
         let model = model.clone();
         with_db(&state.db, move |conn| {
-            if let Ok(Some((current_id, _))) = db::get_post_by_hn_id(conn, hn_id) {
-                if let Err(e) = db::insert_summary(conn, current_id, "comments", &summary_owned, &model) {
-                    error!(%hn_id, error = %e, "failed to insert comments summary");
-                }
-            }
-        }).await;
-    } else if comments_attempted {
+                    if let Ok(Some((current_id, _))) = db::get_post_by_hn_id(conn, hn_id) {
+                        if let Err(e) = db::insert_summary(conn, current_id, "comments", &summary_owned, &model) {
+                            error!(%hn_id, error = %e, "failed to insert comments summary");
+                        }
+                        db::upsert_search_index(conn, current_id).ok();
+                    }
+                }).await;
+            } else if comments_attempted {
         error!(%hn_id, "comments summary failed");
         ok = false;
         errors.push("comments summary failed");
@@ -898,11 +980,12 @@ async fn fetch_and_summarize(
     if let Some(ref summary) = article_result {
         let summary_owned = summary.clone();
         with_db(&state.db, move |conn| {
-            if let Ok(Some((current_id, _))) = db::get_post_by_hn_id(conn, hn_id) {
-                if let Err(e) = db::insert_summary(conn, current_id, "article", &summary_owned, &model) {
-                    error!(%hn_id, error = %e, "failed to insert article summary");
-                }
-            }
+                    if let Ok(Some((current_id, _))) = db::get_post_by_hn_id(conn, hn_id) {
+                        if let Err(e) = db::insert_summary(conn, current_id, "article", &summary_owned, &model) {
+                            error!(%hn_id, error = %e, "failed to insert article summary");
+                        }
+                        db::upsert_search_index(conn, current_id).ok();
+                    }
         }).await;
     } else if article_attempted {
         error!(%hn_id, "article summary failed");

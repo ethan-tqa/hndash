@@ -87,6 +87,11 @@
         Not yet fetched
       {% endif %}
     </span>
+    <form action="/search" method="get" style="display:flex;gap:4px;flex:1;max-width:260px;">
+      <input type="text" name="q" value="{{ query }}" placeholder="Search posts..."
+             style="flex:1;padding:4px 8px;border:1px solid rgba(255,255,255,.3);border-radius:3px;background:rgba(255,255,255,.15);color:#fff;font-size:13px;outline:none;">
+      <button type="submit" class="btn" style="padding:4px 10px;">Search</button>
+    </form>
     <button class="btn" id="refreshBtn" onclick="triggerRefresh()">Refresh</button>
     {% if posts %}
     <button class="btn" onclick="markAllRead()">Mark all read</button>
@@ -94,6 +99,13 @@
     <a class="btn" href="/import" style="background:rgba(255,255,255,.15);">Import</a>
     {% endif %}
   </div>
+
+  {% if query %}
+  <div style="padding:8px 0;font-size:13px;color:#555;">
+    Searching for "<strong>{{ query }}</strong>" &middot; {{ total_posts }} result{% if total_posts != 1 %}s{% endif %}
+    &middot; <a href="/" style="color:#ff6600;">Clear search</a>
+  </div>
+  {% endif %}
 
   {% for ps in posts %}
   <div class="post" data-hn-id="{{ ps.post.hn_id }}">
@@ -160,11 +172,19 @@
   {% endfor %}
 
   <div class="pagination">
+    {% if query %}
+    <a class="page-btn {% if page <= 1 %}page-disabled{% endif %}" href="/search?q={{ query | urlencode }}&page={{ page - 1 }}">Prev</a>
+    {% for p in page_range %}
+    <a class="page-btn {% if p == page %}page-active{% endif %}" href="/search?q={{ query | urlencode }}&page={{ p }}">{{ p }}</a>
+    {% endfor %}
+    <a class="page-btn {% if page >= total_pages %}page-disabled{% endif %}" href="/search?q={{ query | urlencode }}&page={{ page + 1 }}">Next</a>
+    {% else %}
     <a class="page-btn {% if page <= 1 %}page-disabled{% endif %}" href="/?page={{ page - 1 }}">Prev</a>
     {% for p in page_range %}
     <a class="page-btn {% if p == page %}page-active{% endif %}" href="/?page={{ p }}">{{ p }}</a>
     {% endfor %}
     <a class="page-btn {% if page >= total_pages %}page-disabled{% endif %}" href="/?page={{ page + 1 }}">Next</a>
+    {% endif %}
   </div>
 </div>
 

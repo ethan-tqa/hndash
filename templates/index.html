@@ -6,7 +6,7 @@
 <title>hndash</title>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f6f6ef; color: #333; padding: 16px; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f6f6ef; color: #333; padding: 16px; overflow-x: hidden; }
   .container { max-width: 960px; margin: 0 auto; }
 
   .header { display: flex; align-items: center; gap: 12px; padding: 12px 16px; background: #ff6600; color: #fff; border-radius: 4px; margin-bottom: 16px; }
@@ -32,7 +32,7 @@
   .summaries { padding: 0 14px 10px; display: none; }
   .post.expanded .summaries { display: block; }
   .summary { margin-top: 8px; padding: 8px 10px; background: #fafaf5; border-radius: 3px; border-left: 3px solid #ddd; font-size: 13px; line-height: 1.5; }
-  .summary-body { white-space: pre-wrap; }
+  .summary-body { white-space: pre-wrap; overflow-wrap: break-word; }
   .summary-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; font-size: 11px; font-weight: 600; color: #888; text-transform: uppercase; }
   .summary-actions { display: flex; gap: 4px; }
 
@@ -40,6 +40,31 @@
 
   .refresh-spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid rgba(255,255,255,.3); border-top-color: #fff; border-radius: 50%; animation: spin .6s linear infinite; vertical-align: middle; }
   @keyframes spin { to { transform: rotate(360deg); } }
+
+  @media (max-width: 600px) {
+    body { padding: 8px; }
+    .header { flex-wrap: wrap; gap: 8px; }
+    .header h1 { font-size: 16px; width: 100%; margin-right: 0; }
+    .header .status { font-size: 12px; width: 100%; }
+    .btn { padding: 8px 12px; font-size: 13px; min-height: 38px; }
+    .btn-sm { padding: 6px 10px; font-size: 12px; min-height: 32px; }
+    .btn-mark-read, .btn-remove { padding: 4px; min-width: 32px; min-height: 32px; display: inline-flex; align-items: center; justify-content: center; }
+    .btn-mark-read .btn-label, .btn-remove .btn-label { display: none; }
+    .btn-mark-read .btn-icon, .btn-remove .btn-icon { width: 16px; height: 16px; }
+    .post-title { font-size: 13px; }
+    .summary { font-size: 12px; padding: 6px 8px; }
+    .container { padding: 0 4px; }
+  }
+
+  @media (max-width: 768px) {
+    .container { max-width: 100%; }
+    .post-header { flex-direction: column; align-items: flex-start; gap: 4px; }
+    .post-title { display: flex; flex-direction: column; width: 100%; gap: 2px; }
+    .post-meta { display: flex; flex-direction: column; gap: 4px; width: 100%; }
+    .post-meta-stats { display: inline-flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+    .post-meta-stats span { margin-left: 0; }
+    .post-meta-actions { display: inline-flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+  }
 </style>
 </head>
 <body>
@@ -64,25 +89,37 @@
   <div class="post" data-hn-id="{{ ps.post.hn_id }}">
     <div class="post-header" onclick="this.parentElement.classList.toggle('expanded')">
       <span class="post-title">
-        {% if ps.post.url %}
-          <a href="{{ ps.post.url }}" target="_blank">{{ ps.post.title }}</a>
-        {% else %}
-          {{ ps.post.title }}
-        {% endif %}
-        <span style="font-size:11px;color:#888;">
+        <span class="post-title-text">
+          {% if ps.post.url %}
+            <a href="{{ ps.post.url }}" target="_blank">{{ ps.post.title }}</a>
+          {% else %}
+            {{ ps.post.title }}
+          {% endif %}
+        </span>
+        <span class="post-info" style="font-size:11px;color:#888;">
           ({{ ps.post.author }} &middot; {{ ps.post.created_at }}
           &middot; <a href="https://news.ycombinator.com/item?id={{ ps.post.hn_id }}" target="_blank" style="color:#888;">HN</a>)
         </span>
       </span>
       <span class="post-meta">
-        {% if not ps.post.read_at and ps.summaries %}<span class="unread-dot"></span>{% endif %}
-        <span>{{ ps.post.points }} pts</span>
-        <span>{{ ps.post.num_comments }} cmts</span>
-        <span class="badge badge-{{ ps.post.fetch_status }}">{{ ps.post.fetch_status }}</span>
-        {% if not ps.post.read_at and ps.summaries %}
-        <button class="btn btn-sm btn-mark-read" style="background:#f0f0e8;color:#333;" onclick="event.stopPropagation();markPostRead({{ ps.post.hn_id }})">Mark read</button>
-        {% endif %}
-        <button class="btn btn-sm" style="background:#f0f0e8;color:#333;" onclick="event.stopPropagation();removePost({{ ps.post.hn_id }})">Remove</button>
+        <span class="post-meta-stats">
+          {% if not ps.post.read_at and ps.summaries %}<span class="unread-dot"></span>{% endif %}
+          <span>{{ ps.post.points }} pts</span>
+          <span>{{ ps.post.num_comments }} cmts</span>
+        </span>
+        <span class="post-meta-actions">
+          <span class="badge badge-{{ ps.post.fetch_status }}">{{ ps.post.fetch_status }}</span>
+          {% if not ps.post.read_at and ps.summaries %}
+          <button class="btn btn-sm btn-mark-read" style="background:#f0f0e8;color:#333;" onclick="event.stopPropagation();markPostRead({{ ps.post.hn_id }})">
+            <svg class="btn-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+            <span class="btn-label">Mark read</span>
+          </button>
+          {% endif %}
+          <button class="btn btn-sm btn-remove" style="background:#f0f0e8;color:#333;" onclick="event.stopPropagation();removePost({{ ps.post.hn_id }})">
+            <svg class="btn-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+            <span class="btn-label">Remove</span>
+          </button>
+        </span>
       </span>
     </div>
 

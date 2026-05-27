@@ -13,6 +13,7 @@ pub struct Post {
     pub created_at: String,
     pub fetched_at: String,
     pub fetch_status: String,
+    pub read_at: Option<String>,
 }
 
 /// A generated summary for a post (post text, comments, or article).
@@ -24,7 +25,6 @@ pub struct Summary {
     pub content: String,
     pub model: String,
     pub created_at: String,
-    pub read_at: Option<String>,
 }
 
 /// Top-level application configuration deserialized from `config.toml`.

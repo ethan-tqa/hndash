@@ -20,7 +20,8 @@ pub fn init(path: &str) -> Result<Connection> {
             created_at    TEXT NOT NULL,
             fetched_at    TEXT NOT NULL DEFAULT (datetime('now')),
             fetch_status  TEXT NOT NULL DEFAULT 'pending'
-                            CHECK(fetch_status IN ('pending','done','error'))
+                            CHECK(fetch_status IN ('pending','done','error')),
+            read_at       TEXT
         );
 
         CREATE TABLE IF NOT EXISTS summaries (
@@ -30,7 +31,6 @@ pub fn init(path: &str) -> Result<Connection> {
             content       TEXT NOT NULL,
             model         TEXT NOT NULL,
             created_at    TEXT NOT NULL DEFAULT (datetime('now')),
-            read_at       TEXT,
             UNIQUE(post_id, summary_type)
         );
 
@@ -106,9 +106,9 @@ pub fn insert_summary(
 pub fn query_posts_with_summaries(conn: &Connection) -> Result<Vec<PostSummary>> {
     let mut stmt = conn.prepare(
         "SELECT p.id, p.hn_id, p.title, p.url, p.author, p.points, p.num_comments,
-                p.created_at, p.fetched_at, p.fetch_status,
+                p.created_at, p.fetched_at, p.fetch_status, p.read_at,
                 s.id, s.post_id, s.summary_type, s.content, s.model,
-                s.created_at, s.read_at
+                s.created_at
          FROM posts p
          LEFT JOIN summaries s ON s.post_id = p.id
          ORDER BY p.created_at DESC",
@@ -126,17 +126,17 @@ pub fn query_posts_with_summaries(conn: &Connection) -> Result<Vec<PostSummary>>
             created_at: row.get(7)?,
             fetched_at: row.get(8)?,
             fetch_status: row.get(9)?,
+            read_at: row.get(10)?,
         };
-        let s_id: Option<i64> = row.get(10)?;
+        let s_id: Option<i64> = row.get(11)?;
         let summary = if s_id.is_some() {
             Some(Summary {
                 id: s_id.unwrap(),
-                post_id: row.get(11)?,
-                summary_type: row.get(12)?,
-                content: row.get(13)?,
-                model: row.get(14)?,
-                created_at: row.get(15)?,
-                read_at: row.get(16)?,
+                post_id: row.get(12)?,
+                summary_type: row.get(13)?,
+                content: row.get(14)?,
+                model: row.get(15)?,
+                created_at: row.get(16)?,
             })
         } else {
             None
@@ -164,21 +164,19 @@ pub fn query_posts_with_summaries(conn: &Connection) -> Result<Vec<PostSummary>>
     Ok(posts)
 }
 
-/// Set `read_at` for a specific summary type on a post.
-pub fn mark_summary_read(conn: &Connection, hn_id: i64, summary_type: &str) -> Result<()> {
+/// Set `read_at` on a post (marks the entire post as read).
+pub fn mark_post_read(conn: &Connection, hn_id: i64) -> Result<()> {
     conn.execute(
-        "UPDATE summaries SET read_at = datetime('now')
-         WHERE post_id = (SELECT id FROM posts WHERE hn_id = ?1)
-         AND summary_type = ?2",
-        params![hn_id, summary_type],
+        "UPDATE posts SET read_at = datetime('now') WHERE hn_id = ?1 AND read_at IS NULL",
+        params![hn_id],
     )?;
     Ok(())
 }
 
-/// Set `read_at` on every summary where it is currently null.
+/// Set `read_at` on every post where it is currently null.
 pub fn mark_all_read(conn: &Connection) -> Result<()> {
     conn.execute(
-        "UPDATE summaries SET read_at = datetime('now') WHERE read_at IS NULL",
+        "UPDATE posts SET read_at = datetime('now') WHERE read_at IS NULL",
         [],
     )?;
     Ok(())
@@ -190,21 +188,6 @@ pub fn delete_summaries_for_post(conn: &Connection, hn_id: i64) -> Result<()> {
         "DELETE FROM summaries WHERE post_id = (SELECT id FROM posts WHERE hn_id = ?1)",
         params![hn_id],
     )?;
-    Ok(())
-}
-
-/// Remove a single summary matching type for a post.
-pub fn delete_summary(conn: &Connection, hn_id: i64, summary_type: &str) -> Result<()> {
-    conn.execute(
-        "DELETE FROM summaries WHERE post_id = (SELECT id FROM posts WHERE hn_id = ?1) AND summary_type = ?2",
-        params![hn_id, summary_type],
-    )?;
-    Ok(())
-}
-
-/// Remove every summary row from the database.
-pub fn delete_all_summaries(conn: &Connection) -> Result<()> {
-    conn.execute("DELETE FROM summaries", [])?;
     Ok(())
 }
 

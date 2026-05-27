@@ -70,7 +70,7 @@ async fn main() {
         .route("/", get(dashboard))
         .route("/refresh", post(trigger_refresh))
         .route("/resummarize/{hn_id}", post(resummarize))
-        .route("/mark-read/{hn_id}/{summary_type}", post(mark_read))
+        .route("/mark-read-post/{hn_id}", post(mark_read_post))
         .route("/mark-read-all", post(mark_all_read))
         .route("/remove-all-posts", post(remove_all_posts))
         .route("/remove-post/{hn_id}", post(remove_post))
@@ -197,16 +197,16 @@ async fn resummarize(
     (StatusCode::ACCEPTED, "Re-summarize queued").into_response()
 }
 
-async fn mark_read(
+async fn mark_read_post(
     state: State<AppStateRef>,
-    Path((hn_id, summary_type)): Path<(i64, String)>,
+    Path(hn_id): Path<i64>,
 ) -> impl IntoResponse {
     let conn = state.db.lock().expect("db lock");
-    match db::mark_summary_read(&conn, hn_id, &summary_type) {
+    match db::mark_post_read(&conn, hn_id) {
         Ok(_) => (StatusCode::OK, "Marked as read").into_response(),
         Err(e) => {
-            error!(%hn_id, %summary_type, error = %e, "failed to mark read");
-            (StatusCode::INTERNAL_SERVER_ERROR, "Failed to mark read").into_response()
+            error!(%hn_id, error = %e, "failed to mark post read");
+            (StatusCode::INTERNAL_SERVER_ERROR, "Failed to mark post read").into_response()
         }
     }
 }

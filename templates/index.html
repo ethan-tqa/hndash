@@ -75,9 +75,14 @@
         </span>
       </span>
       <span class="post-meta">
+        {% if not ps.post.read_at and ps.summaries %}<span class="unread-dot"></span>{% endif %}
         <span>{{ ps.post.points }} pts</span>
         <span>{{ ps.post.num_comments }} cmts</span>
         <span class="badge badge-{{ ps.post.fetch_status }}">{{ ps.post.fetch_status }}</span>
+        {% if not ps.post.read_at and ps.summaries %}
+        <button class="btn btn-sm btn-mark-read" style="background:#f0f0e8;color:#333;" onclick="event.stopPropagation();markPostRead({{ ps.post.hn_id }})">Mark read</button>
+        {% endif %}
+        <button class="btn btn-sm" style="background:#f0f0e8;color:#333;" onclick="event.stopPropagation();removePost({{ ps.post.hn_id }})">Remove</button>
       </span>
     </div>
 
@@ -87,18 +92,9 @@
       </div>
 
       {% for summary in ps.summaries %}
-      <div class="summary" data-summary-type="{{ summary.summary_type }}" data-summary-id="{{ summary.id }}">
+      <div class="summary" data-summary-type="{{ summary.summary_type }}">
         <div class="summary-header">
-          <span>
-            {% if not summary.read_at %}<span class="unread-dot"></span>{% endif %}
-            {{ summary.summary_type }}
-          </span>
-          <span class="summary-actions">
-            <button class="btn btn-sm" style="background:#f0f0e8;color:#333;" onclick="event.stopPropagation();apiPost('/remove-post/{{ ps.post.hn_id }}')">Remove</button>
-            {% if not summary.read_at %}
-            <button class="btn btn-sm" style="background:#f0f0e8;color:#333;" onclick="event.stopPropagation();markRead({{ ps.post.hn_id }},'{{ summary.summary_type }}')">Mark read</button>
-            {% endif %}
-          </span>
+          <span>{{ summary.summary_type }}</span>
         </div>
         <div class="summary-body">{{ summary.content }}</div>
       </div>
@@ -139,7 +135,24 @@ function triggerRefresh() {
 
 function markAllRead() { apiPost('/mark-read-all'); }
 function resummarize(hnId) { if (confirm('Re-summarize this post?')) apiPost('/resummarize/' + hnId); }
-function markRead(hnId, type) { apiPost('/mark-read/' + hnId + '/' + type); }
+
+function markPostRead(hnId) {
+  fetch('/mark-read-post/' + hnId, { method: 'POST' }).then(resp => {
+    if (resp.ok) {
+      const post = document.querySelector('.post[data-hn-id="' + hnId + '"]');
+      if (post) {
+        const dot = post.querySelector('.post-header .unread-dot');
+        if (dot) dot.remove();
+        const btn = post.querySelector('.btn-mark-read');
+        if (btn) btn.remove();
+      }
+    }
+  });
+}
+
+function removePost(hnId) {
+  if (confirm('Remove this post?')) apiPost('/remove-post/' + hnId);
+}
 </script>
 </body>
 </html>

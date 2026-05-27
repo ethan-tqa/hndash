@@ -30,6 +30,8 @@
   .badge-error { background: #fce8e6; color: #c5221f; }
   .badge-pending { background: #fef7e0; color: #b06000; }
   .badge-processing { background: #e8f0fe; color: #1a73e8; }
+  .btn-retry { background: #fff; color: #1a73e8; border: 1px solid #1a73e8; padding: 4px 12px; font-size: 12px; cursor: pointer; border-radius: 3px; }
+  .btn-retry:hover { background: #e8f0fe; }
 
   .flash { padding: 10px 14px; border-radius: 3px; margin-bottom: 12px; font-size: 13px; }
   .flash-success { background: #e6f4ea; color: #137333; border: 1px solid #c3e6c5; }
@@ -66,7 +68,14 @@
   </div>
 
   <div class="section">
-    <h2>Queue</h2>
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;">
+      <h2 style="margin:0;">Queue</h2>
+      {% if has_errors %}
+      <form method="post" action="/retry-imports" style="margin:0;">
+        <button type="submit" class="btn btn-retry">Retry Failed</button>
+      </form>
+      {% endif %}
+    </div>
     {% if queue %}
     <table>
       <tr><th>HN ID</th><th>URL</th><th>Status</th><th>Error</th><th>Added</th></tr>

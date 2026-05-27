@@ -139,6 +139,7 @@ async fn main() {
         .route("/remove-post/{hn_id}", post(remove_post))
         .route("/search", get(search))
         .route("/import", get(import_page).post(import_submit))
+        .route("/retry-imports", post(retry_imports))
         .with_state(state.clone());
 
     let addr = format!("{}:{}", state.config.server.host, state.config.server.port);
@@ -395,11 +396,13 @@ fn extract_hn_ids(text: &str) -> Vec<i64> {
 
 async fn import_page(state: State<AppStateRef>) -> impl IntoResponse {
     let queue = with_db(&state.db, |conn| db::get_all_imports(conn).unwrap_or_default()).await;
+    let has_errors = queue.iter().any(|item| item.status == "error");
 
     let ctx = serde_json::json!({
         "queue": queue,
         "pasted_text": "",
         "imported_count": 0,
+        "has_errors": has_errors,
     });
 
     match state.templates.get_template("import.html") {
@@ -443,11 +446,13 @@ async fn import_submit(
     }
 
     let queue = with_db(&state.db, |conn| db::get_all_imports(conn).unwrap_or_default()).await;
+    let has_errors = queue.iter().any(|item| item.status == "error");
 
     let ctx = serde_json::json!({
         "queue": queue,
         "pasted_text": pasted,
         "imported_count": imported_count,
+        "has_errors": has_errors,
     });
 
     match state.templates.get_template("import.html") {
@@ -463,6 +468,17 @@ async fn import_submit(
             (StatusCode::INTERNAL_SERVER_ERROR, "Template error").into_response()
         }
     }
+}
+
+async fn retry_imports(state: State<AppStateRef>) -> impl IntoResponse {
+    let pending = with_db(&state.db, |conn| db::reset_errored_imports(conn).unwrap_or(0)).await;
+    if pending > 0 {
+        let state_clone = state.0.clone();
+        tokio::spawn(async move {
+            process_import_queue(&state_clone).await;
+        });
+    }
+    Redirect::to("/import")
 }
 
 // ── Search ──────────────────────────────────────────────────

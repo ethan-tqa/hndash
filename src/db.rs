@@ -306,6 +306,20 @@ pub fn insert_import_item(conn: &Connection, hn_id: i64, url: &str) -> Result<()
     Ok(())
 }
 
+/// Reset all errored import items back to pending (for retry). Returns the new pending count.
+pub fn reset_errored_imports(conn: &Connection) -> Result<i64> {
+    conn.execute(
+        "UPDATE import_queue SET status = 'pending', error_message = NULL
+         WHERE status = 'error'",
+        [],
+    )?;
+    conn.query_row(
+        "SELECT COUNT(*) FROM import_queue WHERE status = 'pending'",
+        [],
+        |row| row.get(0),
+    )
+}
+
 /// Return all import queue items, newest first.
 pub fn get_all_imports(conn: &Connection) -> Result<Vec<crate::models::ImportItem>> {
     let mut stmt = conn.prepare(

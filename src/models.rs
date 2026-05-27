@@ -14,6 +14,8 @@ pub struct Post {
     pub fetched_at: String,
     pub fetch_status: String,
     pub read_at: Option<String>,
+    pub retry_count: i64,
+    pub error_message: Option<String>,
 }
 
 /// A generated summary for a post (post text, comments, or article).
@@ -45,6 +47,8 @@ pub struct HnConfig {
     pub fetch_interval_minutes: u64,
     pub max_fetch_pages: u32,
     pub max_age_hours: u64,
+    #[serde(default)]
+    pub min_age_hours: Option<u64>,
 }
 
 /// DeepSeek / OpenAI-compatible LLM API configuration.

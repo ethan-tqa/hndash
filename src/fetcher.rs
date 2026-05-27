@@ -68,16 +68,29 @@ pub struct Comment {
 
 /// Build the Algolia search URL with numeric filters for a given page.
 pub fn search_url(config: &HnConfig, page: u32) -> String {
-    let cutoff = std::time::SystemTime::now()
+    let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
-        .as_secs()
-        .saturating_sub(config.max_age_hours * 3600);
+        .as_secs();
 
-    let numeric = format!(
-        "points>={},num_comments>={},created_at_i>={}",
-        config.min_points, config.min_comments, cutoff
-    );
+    let mut filters = vec![
+        format!("points>={}", config.min_points),
+        format!("num_comments>={}", config.min_comments),
+    ];
+
+    if config.max_age_hours > 0 {
+        let cutoff = now.saturating_sub(config.max_age_hours * 3600);
+        filters.push(format!("created_at_i>={}", cutoff));
+    }
+
+    if let Some(min_hours) = config.min_age_hours {
+        if min_hours > 0 {
+            let cutoff = now.saturating_sub(min_hours * 3600);
+            filters.push(format!("created_at_i<={}", cutoff));
+        }
+    }
+
+    let numeric = filters.join(",");
     format!(
         "https://hn.algolia.com/api/v1/search?tags=story&hitsPerPage=50&page={}&numericFilters={}",
         page,

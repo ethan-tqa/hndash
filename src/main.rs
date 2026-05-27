@@ -20,7 +20,7 @@ use axum::routing::{get, post};
 use axum::Router;
 use rusqlite::Connection;
 use tracing::{error, info, warn};
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Layer, EnvFilter};
 
 use crate::fetcher::{search_stories, top_comments};
 use crate::models::Config;
@@ -38,8 +38,20 @@ struct AppState {
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+    let file_appender = tracing_appender::rolling::daily("logs", "hndash.log");
+    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+
+    let stdout_layer = tracing_subscriber::fmt::layer()
+        .with_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()));
+
+    let file_layer = tracing_subscriber::fmt::layer()
+        .with_writer(non_blocking)
+        .with_ansi(false)
+        .with_filter(EnvFilter::new("warn"));
+
+    tracing_subscriber::registry()
+        .with(stdout_layer)
+        .with(file_layer)
         .init();
 
     let cfg = config::load_config();

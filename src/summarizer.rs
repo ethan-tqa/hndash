@@ -108,6 +108,7 @@ async fn chat_completion(
     user_content: &str,
     hn_id: i64,
 ) -> Option<String> {
+    let start = std::time::Instant::now();
     let url = format!("{}/v1/chat/completions", config.base_url.trim_end_matches('/'));
 
     let body = ChatRequest {
@@ -150,7 +151,7 @@ async fn chat_completion(
     {
         Ok(r) => r,
         Err(e) => {
-            warn!(hn_id, error = %e, "ai request failed");
+            warn!(hn_id, duration_ms = start.elapsed().as_millis() as u64, error = %e, "ai request failed");
             return None;
         }
     };
@@ -158,7 +159,7 @@ async fn chat_completion(
     let chat: ChatResponse = match resp.json().await {
         Ok(c) => c,
         Err(e) => {
-            warn!(hn_id, error = %e, "ai response parse failed");
+            warn!(hn_id, duration_ms = start.elapsed().as_millis() as u64, error = %e, "ai response parse failed");
             return None;
         }
     };
@@ -166,17 +167,22 @@ async fn chat_completion(
     let content = match chat.choices.into_iter().next() {
         Some(c) => c.message.content,
         None => {
-            warn!(hn_id, "ai response no choices");
+            warn!(hn_id, duration_ms = start.elapsed().as_millis() as u64, "ai response no choices");
             return None;
         }
     };
 
     if content.trim().is_empty() {
-        warn!(hn_id, "ai response empty");
+        warn!(hn_id, duration_ms = start.elapsed().as_millis() as u64, "ai response empty");
         return None;
     }
 
-    info!(hn_id, response = %content, "ai response");
+    info!(
+        hn_id,
+        duration_ms = start.elapsed().as_millis() as u64,
+        response = %content,
+        "ai response"
+    );
     Some(content)
 }
 

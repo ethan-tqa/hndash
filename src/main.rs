@@ -431,78 +431,89 @@ async fn fetch_and_summarize(
         None
     };
 
-    let mut ok = true;
-
     let story_text = item.as_ref()
         .and_then(|i| i.text.as_deref())
-        .filter(|s| !s.is_empty());
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
 
-    if let Some(story) = story_text {
-        info!(%hn_id, "summarizing post story text");
-        let post_ok = summarizer::summarize_post(
-            &state.http_client, llm_config, title, Some(story), hn_id
-        ).await;
-        if let Some(ref summary) = post_ok {
-            let conn = state.db.lock().expect("db lock");
-            if let Err(e) = db::insert_summary(&conn, post_id, "post", summary, &llm_config.model) {
-                error!(%hn_id, error = %e, "failed to insert post summary");
+    let post_fut = async {
+        if let Some(ref story) = story_text {
+            info!(%hn_id, "summarizing post story text");
+            let result = summarizer::summarize_post(
+                &state.http_client, llm_config, title, Some(story), hn_id
+            ).await;
+            (result, true)
+        } else {
+            (None, false)
+        }
+    };
+
+    let comments_fut = async {
+        if let Some(ref text) = comments_text {
+            if !text.is_empty() && text.len() > 10 {
+                info!(%hn_id, "summarizing comments");
+                let result = summarizer::summarize_comments(
+                    &state.http_client, llm_config, text, hn_id
+                ).await;
+                (result, true)
+            } else {
+                (None, false)
             }
         } else {
-            error!(%hn_id, "post story text summary failed");
-            ok = false;
+            (None, false)
         }
-    } else {
-        info!(%hn_id, "no story text to summarize, skipping post summary");
+    };
+
+    let article_fut = async {
+        if let Some(ref text) = article_text {
+            if !text.is_empty() {
+                info!(%hn_id, "summarizing article");
+                let result = summarizer::summarize_article(
+                    &state.http_client, llm_config, text, hn_id
+                ).await;
+                (result, true)
+            } else {
+                (None, false)
+            }
+        } else {
+            (None, false)
+        }
+    };
+
+    let ((post_result, post_attempted),
+         (comments_result, comments_attempted),
+         (article_result, article_attempted)) = tokio::join!(post_fut, comments_fut, article_fut);
+
+    let mut ok = true;
+
+    if let Some(ref summary) = post_result {
+        let conn = state.db.lock().expect("db lock");
+        if let Err(e) = db::insert_summary(&conn, post_id, "post", summary, &llm_config.model) {
+            error!(%hn_id, error = %e, "failed to insert post summary");
+        }
+    } else if post_attempted {
+        error!(%hn_id, "post story text summary failed");
+        ok = false;
     }
 
-    tokio::time::sleep(Duration::from_millis(500)).await;
-
-    if let Some(ref text) = comments_text {
-        if !text.is_empty() && text.len() > 10 {
-            info!(%hn_id, "summarizing comments");
-            let comments_ok =
-                summarizer::summarize_comments(&state.http_client, llm_config, text, hn_id).await;
-            if let Some(ref summary) = comments_ok {
-                let conn = state.db.lock().expect("db lock");
-                if let Err(e) = db::insert_summary(
-                    &conn,
-                    post_id,
-                    "comments",
-                    summary,
-                    &llm_config.model,
-                ) {
-                    error!(%hn_id, error = %e, "failed to insert comments summary");
-                }
-            } else {
-                error!(%hn_id, "comments summary failed");
-                ok = false;
-            }
+    if let Some(ref summary) = comments_result {
+        let conn = state.db.lock().expect("db lock");
+        if let Err(e) = db::insert_summary(&conn, post_id, "comments", summary, &llm_config.model) {
+            error!(%hn_id, error = %e, "failed to insert comments summary");
         }
+    } else if comments_attempted {
+        error!(%hn_id, "comments summary failed");
+        ok = false;
     }
 
-    tokio::time::sleep(Duration::from_millis(500)).await;
-
-    if let Some(ref text) = article_text {
-        if !text.is_empty() {
-            info!(%hn_id, "summarizing article");
-            let article_ok =
-                summarizer::summarize_article(&state.http_client, llm_config, text, hn_id).await;
-            if let Some(ref summary) = article_ok {
-                let conn = state.db.lock().expect("db lock");
-                if let Err(e) = db::insert_summary(
-                    &conn,
-                    post_id,
-                    "article",
-                    summary,
-                    &llm_config.model,
-                ) {
-                    error!(%hn_id, error = %e, "failed to insert article summary");
-                }
-            } else {
-                error!(%hn_id, "article summary failed");
-                ok = false;
-            }
+    if let Some(ref summary) = article_result {
+        let conn = state.db.lock().expect("db lock");
+        if let Err(e) = db::insert_summary(&conn, post_id, "article", summary, &llm_config.model) {
+            error!(%hn_id, error = %e, "failed to insert article summary");
         }
+    } else if article_attempted {
+        error!(%hn_id, "article summary failed");
+        ok = false;
     }
 
     ok

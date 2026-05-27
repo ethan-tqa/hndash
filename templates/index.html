@@ -19,7 +19,7 @@
   .post { background: #fff; border: 1px solid #e0e0d0; border-radius: 3px; margin-bottom: 10px; }
   .post-header { display: flex; align-items: center; gap: 8px; padding: 10px 14px; cursor: pointer; }
   .post-header:hover { background: #fafaf5; }
-  .post-title { flex: 1; font-size: 14px; }
+  .post-title { flex: 1; font-size: 14px; display: flex; flex-direction: column; gap: 2px; }
   .post-title a { color: #222; text-decoration: none; }
   .post-title a:hover { text-decoration: underline; }
   .post-meta { font-size: 12px; color: #666; white-space: nowrap; }
@@ -36,7 +36,9 @@
   .summary-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; font-size: 11px; font-weight: 600; color: #888; text-transform: uppercase; }
   .summary-actions { display: flex; gap: 4px; }
 
-  .unread-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #ff6600; margin-right: 4px; vertical-align: baseline; position: relative; top: 1px; }
+  .post-title-line { display: inline-flex; align-items: center; gap: 2px; }
+  .unread-dot-wrap { display: inline-flex; align-items: center; min-width: 12px; height: 12px; }
+  .unread-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #ff6600; }
 
   .refresh-spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid rgba(255,255,255,.3); border-top-color: #fff; border-radius: 50%; animation: spin .6s linear infinite; vertical-align: middle; }
   @keyframes spin { to { transform: rotate(360deg); } }
@@ -59,7 +61,7 @@
   @media (max-width: 768px) {
     .container { max-width: 100%; }
     .post-header { flex-direction: column; align-items: flex-start; gap: 4px; }
-    .post-title { display: flex; flex-direction: column; width: 100%; gap: 2px; }
+    .post-title { width: 100%; }
     .post-meta { display: flex; flex-direction: column; gap: 4px; width: 100%; }
     .post-meta-stats { display: inline-flex; align-items: center; gap: 4px; flex-wrap: wrap; }
     .post-meta-stats span { margin-left: 0; }
@@ -89,12 +91,17 @@
   <div class="post" data-hn-id="{{ ps.post.hn_id }}">
     <div class="post-header" onclick="this.parentElement.classList.toggle('expanded')">
       <span class="post-title">
-        <span class="post-title-text">
-          {% if ps.post.url %}
-            <a href="{{ ps.post.url }}" target="_blank">{{ ps.post.title }}</a>
-          {% else %}
-            {{ ps.post.title }}
-          {% endif %}
+        <span class="post-title-line">
+          <span class="unread-dot-wrap">
+            {% if not ps.post.read_at and ps.summaries %}<span class="unread-dot"></span>{% endif %}
+          </span>
+          <span class="post-title-text">
+            {% if ps.post.url %}
+              <a href="{{ ps.post.url }}" target="_blank">{{ ps.post.title }}</a>
+            {% else %}
+              {{ ps.post.title }}
+            {% endif %}
+          </span>
         </span>
         <span class="post-info" style="font-size:11px;color:#888;">
           ({{ ps.post.author }} &middot; {{ ps.post.created_at }}
@@ -103,7 +110,6 @@
       </span>
       <span class="post-meta">
         <span class="post-meta-stats">
-          {% if not ps.post.read_at and ps.summaries %}<span class="unread-dot"></span>{% endif %}
           <span>{{ ps.post.points }} pts</span>
           <span>{{ ps.post.num_comments }} cmts</span>
         </span>

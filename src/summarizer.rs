@@ -80,7 +80,7 @@ pub async fn summarize_comments(
             client,
             config,
             "You are a helpful assistant that summarizes HackerNews comments. \
-             Provide a concise 2-3 sentence summary of the key points \
+             Provide a concise 3-5 sentence summary of the key points \
              and opinions expressed in these comments.",
             &content,
             hn_id,
@@ -101,7 +101,7 @@ pub async fn summarize_article(
             client,
             config,
             "You are a helpful assistant that summarizes articles. \
-             Provide a concise 2-3 sentence summary of the article.",
+             Provide a concise 3-5 sentence summary of the article.",
             &content,
             hn_id,
         )

@@ -28,12 +28,25 @@ use crate::models::Config;
 type AppStateRef = Arc<AppState>;
 
 struct AppState {
-    db: Mutex<Connection>,
+    db: Arc<Mutex<Connection>>,
     fetch_in_progress: AtomicBool,
     http_client: reqwest::Client,
     config: Config,
     templates: minijinja::Environment<'static>,
     last_fetch_time: Mutex<Option<String>>,
+}
+
+async fn with_db<R>(db: &Arc<Mutex<Connection>>, f: impl FnOnce(&Connection) -> R + Send + 'static) -> R
+where
+    R: Send + 'static,
+{
+    let db = Arc::clone(db);
+    tokio::task::spawn_blocking(move || {
+        let conn = db.lock().expect("db lock");
+        f(&conn)
+    })
+    .await
+    .expect("blocking task panicked")
 }
 
 #[tokio::main]
@@ -79,7 +92,7 @@ async fn main() {
         .expect("Failed to add import template");
 
     let state = Arc::new(AppState {
-        db: Mutex::new(conn),
+        db: Arc::new(Mutex::new(conn)),
         fetch_in_progress: AtomicBool::new(false),
         http_client,
         config: cfg,
@@ -105,10 +118,7 @@ async fn main() {
     recover_pending_posts(&state).await;
 
     // Recover any import queue items stuck in "processing" from a previous crash
-    let pending_imports = {
-        let conn = state.db.lock().expect("db lock");
-        db::reset_stuck_imports(&conn).unwrap_or(0)
-    };
+    let pending_imports = with_db(&state.db, |conn| db::reset_stuck_imports(conn).unwrap_or(0)).await;
     if pending_imports > 0 {
         info!(pending_imports, "resuming import queue");
         let state_clone = state.clone();
@@ -166,13 +176,12 @@ async fn dashboard(
         .max(1);
     let per_page: i64 = 20;
 
-    let (posts, total_posts) = {
-        let conn = state.db.lock().expect("db lock");
-        let total = db::count_posts(&conn).unwrap_or(0);
+    let (posts, total_posts) = with_db(&state.db, move |conn| {
+        let total = db::count_posts(conn).unwrap_or(0);
         let posts =
-            db::query_posts_with_summaries_paginated(&conn, page, per_page).unwrap_or_default();
+            db::query_posts_with_summaries_paginated(conn, page, per_page).unwrap_or_default();
         (posts, total)
-    };
+    }).await;
 
     let total_pages = (total_posts + per_page - 1) / per_page;
     let page_range: Vec<i64> = (1..=total_pages.max(1)).collect();
@@ -221,29 +230,32 @@ async fn resummarize(
     Path(hn_id): Path<i64>,
 ) -> impl IntoResponse {
     // Check post exists
-    let exists = {
-        let conn = state.db.lock().expect("db lock");
-        db::get_post_by_hn_id(&conn, hn_id)
+    let exists = with_db(&state.db, move |conn| {
+        db::get_post_by_hn_id(conn, hn_id)
             .ok()
             .flatten()
             .is_some()
-    };
+    }).await;
 
     if !exists {
         return (StatusCode::NOT_FOUND, "Post not found").into_response();
     }
 
     // Delete existing summaries
-    {
-        let conn = state.db.lock().expect("db lock");
-        if let Err(e) = db::delete_summaries_for_post(&conn, hn_id) {
+    let summaries_ok = with_db(&state.db, move |conn| {
+        if let Err(e) = db::delete_summaries_for_post(conn, hn_id) {
             error!(%hn_id, error = %e, "failed to delete summaries");
-            return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to delete summaries")
-                .into_response();
+            return false;
         }
-        if let Err(e) = db::update_fetch_status(&conn, hn_id, "pending", None) {
+        if let Err(e) = db::update_fetch_status(conn, hn_id, "pending", None) {
             error!(%hn_id, error = %e, "failed to set pending status");
         }
+        true
+    }).await;
+
+    if !summaries_ok {
+        return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to delete summaries")
+            .into_response();
     }
 
     // Reprocess in background
@@ -259,8 +271,7 @@ async fn mark_read_post(
     state: State<AppStateRef>,
     Path(hn_id): Path<i64>,
 ) -> impl IntoResponse {
-    let conn = state.db.lock().expect("db lock");
-    match db::mark_post_read(&conn, hn_id) {
+    match with_db(&state.db, move |conn| db::mark_post_read(conn, hn_id)).await {
         Ok(_) => (StatusCode::OK, "Marked as read").into_response(),
         Err(e) => {
             error!(%hn_id, error = %e, "failed to mark post read");
@@ -270,8 +281,7 @@ async fn mark_read_post(
 }
 
 async fn mark_all_read(state: State<AppStateRef>) -> impl IntoResponse {
-    let conn = state.db.lock().expect("db lock");
-    match db::mark_all_read(&conn) {
+    match with_db(&state.db, |conn| db::mark_all_read(conn)).await {
         Ok(_) => (StatusCode::OK, "All marked as read").into_response(),
         Err(e) => {
             error!(error = %e, "failed to mark all read");
@@ -281,8 +291,7 @@ async fn mark_all_read(state: State<AppStateRef>) -> impl IntoResponse {
 }
 
 async fn remove_all_posts(state: State<AppStateRef>) -> impl IntoResponse {
-    let conn = state.db.lock().expect("db lock");
-    match db::delete_all_posts(&conn) {
+    match with_db(&state.db, |conn| db::delete_all_posts(conn)).await {
         Ok(_) => (StatusCode::OK, "All posts removed").into_response(),
         Err(e) => {
             error!(error = %e, "failed to remove all posts");
@@ -295,8 +304,7 @@ async fn remove_post(
     state: State<AppStateRef>,
     Path(hn_id): Path<i64>,
 ) -> impl IntoResponse {
-    let conn = state.db.lock().expect("db lock");
-    match db::delete_post(&conn, hn_id) {
+    match with_db(&state.db, move |conn| db::delete_post(conn, hn_id)).await {
         Ok(_) => (StatusCode::OK, "Post removed").into_response(),
         Err(e) => {
             error!(%hn_id, error = %e, "failed to remove post");
@@ -329,10 +337,7 @@ fn extract_hn_ids(text: &str) -> Vec<i64> {
 }
 
 async fn import_page(state: State<AppStateRef>) -> impl IntoResponse {
-    let queue = {
-        let conn = state.db.lock().expect("db lock");
-        db::get_all_imports(&conn).unwrap_or_default()
-    };
+    let queue = with_db(&state.db, |conn| db::get_all_imports(conn).unwrap_or_default()).await;
 
     let ctx = serde_json::json!({
         "queue": queue,
@@ -361,30 +366,26 @@ async fn import_submit(
 ) -> impl IntoResponse {
     let pasted = form.get("urls").map(|s| s.as_str()).unwrap_or("");
     let ids = extract_hn_ids(pasted);
-    let imported_count = {
-        let conn = state.db.lock().expect("db lock");
+    let (imported_count, pending) = with_db(&state.db, move |conn| {
         let mut count = 0i64;
         for id in &ids {
             let url = format!("https://news.ycombinator.com/item?id={}", id);
-            if db::insert_import_item(&conn, *id, &url).is_ok() {
+            if db::insert_import_item(conn, *id, &url).is_ok() {
                 count += 1;
             }
         }
-        // Check if there are pending items to process
-        let pending = db::count_pending_imports(&conn).unwrap_or(0);
-        if pending > 0 {
-            let state_clone = state.0.clone();
-            tokio::spawn(async move {
-                process_import_queue(&state_clone).await;
-            });
-        }
-        count
-    };
+        let pending = db::count_pending_imports(conn).unwrap_or(0);
+        (count, pending)
+    }).await;
 
-    let queue = {
-        let conn = state.db.lock().expect("db lock");
-        db::get_all_imports(&conn).unwrap_or_default()
-    };
+    if pending > 0 {
+        let state_clone = state.0.clone();
+        tokio::spawn(async move {
+            process_import_queue(&state_clone).await;
+        });
+    }
+
+    let queue = with_db(&state.db, |conn| db::get_all_imports(conn).unwrap_or_default()).await;
 
     let ctx = serde_json::json!({
         "queue": queue,
@@ -409,15 +410,24 @@ async fn import_submit(
 
 async fn process_import_queue(state: &AppState) {
     loop {
-        let item = {
-            let conn = state.db.lock().expect("db lock");
-            db::claim_next_import(&conn).unwrap_or(None)
-        };
+        let item = with_db(&state.db, |conn| db::claim_next_import(conn).unwrap_or(None)).await;
 
         let (hn_id, _url) = match item {
             Some((id, url)) => (id, url),
             None => break,
         };
+
+        // Skip if the post was already created (e.g. by the fetch cycle)
+        let already_exists = with_db(&state.db, move |conn| {
+            matches!(db::get_post_by_hn_id(conn, hn_id), Ok(Some(_)))
+        }).await;
+        if already_exists {
+            info!(%hn_id, "skipping import, post already exists");
+            with_db(&state.db, move |conn| {
+                db::update_import_status(conn, hn_id, "done", None).ok();
+            }).await;
+            continue;
+        }
 
         info!(%hn_id, "importing post");
 
@@ -437,45 +447,41 @@ async fn process_import_queue(state: &AppState) {
 
                     let article_url = item.url.as_deref();
 
-                    let post_id = {
-                        let conn = state.db.lock().expect("db lock");
-                        match db::upsert_post(
-                            &conn, hn_id, title, article_url, author, points,
-                            num_comments, &created_at,
-                        ) {
-                            Ok(id) => {
-                                let _ = db::update_fetch_status(&conn, hn_id, "pending", None);
-                                id
-                            }
-                            Err(e) => {
-                                error!(%hn_id, error = %e, "failed to insert imported post");
-                                return;
-                            }
+                    let title_owned = title.to_string();
+                    let author_owned = author.to_string();
+                    let article_url_owned = article_url.map(|s| s.to_string());
+
+                    let _post_id = match with_db(&state.db, move |conn| {
+                        db::upsert_post(
+                            conn, hn_id, &title_owned, article_url_owned.as_deref(),
+                            &author_owned, points, num_comments, &created_at,
+                        )
+                        .map(|id| {
+                            let _ = db::update_fetch_status(conn, hn_id, "pending", None);
+                            id
+                        })
+                    }).await {
+                        Ok(id) => id,
+                        Err(e) => {
+                            error!(%hn_id, error = %e, "failed to insert imported post");
+                            return;
                         }
                     };
 
                     let (ok, _summary_error) = fetch_and_summarize(
-                        state, post_id, hn_id, title, article_url,
+                        state, hn_id, title, article_url,
                         &state.config.article, &state.config.llm,
                     )
                     .await;
 
-                    let (status, error_msg) = if ok {
-                        ("done".to_string(), None)
-                    } else {
-                        ("error".to_string(), Some("summarization failed"))
-                    };
+                    let error_msg: Option<&'static str> = if ok { None } else { Some("summarization failed") };
+                    let status_str: &'static str = if ok { "done" } else { "error" };
+                    let msg = error_msg.map(|s| s.to_string());
+                    with_db(&state.db, move |conn| {
+                        db::update_fetch_status(conn, hn_id, status_str, msg.as_deref()).ok();
+                    }).await;
 
-                    {
-                        let conn = state.db.lock().expect("db lock");
-                        let msg = error_msg.map(|s| s.to_string());
-                        db::update_fetch_status(
-                            &conn, hn_id, &status, msg.as_deref(),
-                        )
-                        .ok();
-                    }
-
-                    (status, None::<String>)
+                    (status_str.to_string(), None::<String>)
                 }
                 None => {
                     error!(%hn_id, "failed to fetch item from HN API");
@@ -484,10 +490,11 @@ async fn process_import_queue(state: &AppState) {
             }
         };
 
-        {
-            let conn = state.db.lock().expect("db lock");
-            db::update_import_status(&conn, hn_id, &result.0, result.1.as_deref()).ok();
-        }
+        let result_status = result.0.clone();
+        let result_msg = result.1.clone();
+        with_db(&state.db, move |conn| {
+            db::update_import_status(conn, hn_id, &result_status, result_msg.as_deref()).ok();
+        }).await;
 
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
@@ -525,11 +532,10 @@ async fn run_fetch_cycle(state: &AppState) {
                 Err(_) => continue,
             };
 
-            {
-                let conn = state.db.lock().expect("db lock");
-                if let Ok(Some(_)) = db::get_post_by_hn_id(&conn, hn_id) {
-                    continue;
-                }
+            if with_db(&state.db, move |conn| {
+                matches!(db::get_post_by_hn_id(conn, hn_id), Ok(Some(_)))
+            }).await {
+                continue;
             }
 
             process_post(state, hit, hn_id).await;
@@ -576,36 +582,38 @@ async fn process_post(state: &AppState, hit: &fetcher::SearchHit, hn_id: i64) {
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| ts_to_iso(hit.created_at_i));
 
-    let post_id = {
-        let conn = state.db.lock().expect("db lock");
-        match db::upsert_post(&conn, hn_id, title, url, author, points, num_comments, &created_at)
-        {
-            Ok(id) => {
-                if let Err(e) = db::update_fetch_status(&conn, hn_id, "pending", None) {
+    let title_owned = title.to_string();
+    let author_owned = author.to_string();
+    let url_owned = url.map(|s| s.to_string());
+
+    let _post_id = match with_db(&state.db, move |conn| {
+        db::upsert_post(conn, hn_id, &title_owned, url_owned.as_deref(), &author_owned, points, num_comments, &created_at)
+            .map(|id| {
+                if let Err(e) = db::update_fetch_status(conn, hn_id, "pending", None) {
                     error!(%hn_id, error = %e, "failed to set pending status");
                 }
                 id
-            }
-            Err(e) => {
-                error!(%hn_id, error = %e, "failed to insert post");
-                return;
-            }
+            })
+    }).await {
+        Ok(id) => id,
+        Err(e) => {
+            error!(%hn_id, error = %e, "failed to insert post");
+            return;
         }
     };
 
-    let (ok, error_msg) = fetch_and_summarize(state, post_id, hn_id, title, url, &config.article, &config.llm).await;
+    let (ok, error_msg) = fetch_and_summarize(state, hn_id, title, url, &config.article, &config.llm).await;
 
-    {
-        let conn = state.db.lock().expect("db lock");
-        let status = if ok { "done" } else { "error" };
-        let error_msg = if ok { None } else { Some(error_msg.as_str()) };
-        if let Err(e) = db::update_fetch_status(&conn, hn_id, status, error_msg) {
+    let status: &'static str = if ok { "done" } else { "error" };
+    let error_msg_owned: Option<String> = if ok { None } else { Some(error_msg) };
+    with_db(&state.db, move |conn| {
+        if let Err(e) = db::update_fetch_status(conn, hn_id, status, error_msg_owned.as_deref()) {
             error!(%hn_id, error = %e, "failed to set {} status", status);
         }
         if !ok {
-            let _ = db::increment_retry_count(&conn, hn_id);
+            let _ = db::increment_retry_count(conn, hn_id);
         }
-    }
+    }).await;
 
     info!(%hn_id, title, ok, "post processed");
 }
@@ -613,49 +621,40 @@ async fn process_post(state: &AppState, hit: &fetcher::SearchHit, hn_id: i64) {
 async fn reprocess_post(state: &AppState, hn_id: i64) {
     let config = &state.config;
 
-    let (post_id, title, url) = {
-        let conn = state.db.lock().expect("db lock");
-        let mut stmt = match conn.prepare("SELECT id, title, url FROM posts WHERE hn_id = ?1") {
-            Ok(s) => s,
-            Err(e) => {
-                error!(%hn_id, error = %e, "failed to query post");
-                return;
-            }
-        };
-        match stmt.query_row(rusqlite::params![hn_id], |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?))
-        }) {
-            Ok((id, title, url)) => (id, title, url),
-            Err(e) => {
-                error!(%hn_id, error = %e, "post not found for reprocess");
-                return;
-            }
+    let (_post_id, title, url) = match with_db(&state.db, move |conn| {
+        conn.prepare("SELECT id, title, url FROM posts WHERE hn_id = ?1")
+            .and_then(|mut stmt| stmt.query_row(rusqlite::params![hn_id], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?))
+            }))
+    }).await {
+        Ok((id, title, url)) => (id, title, url),
+        Err(e) => {
+            error!(%hn_id, error = %e, "post not found for reprocess");
+            return;
         }
     };
 
-    let (ok, error_msg) = fetch_and_summarize(state, post_id, hn_id, &title, url.as_deref(), &config.article, &config.llm).await;
+    let (ok, error_msg) = fetch_and_summarize(state, hn_id, &title, url.as_deref(), &config.article, &config.llm).await;
 
-    {
-        let conn = state.db.lock().expect("db lock");
-        let status = if ok { "done" } else { "error" };
-        let error_msg = if ok { None } else { Some(error_msg.as_str()) };
-        if let Err(e) = db::update_fetch_status(&conn, hn_id, status, error_msg) {
+    let status: &'static str = if ok { "done" } else { "error" };
+    let error_msg_owned: Option<String> = if ok { None } else { Some(error_msg) };
+    with_db(&state.db, move |conn| {
+        if let Err(e) = db::update_fetch_status(conn, hn_id, status, error_msg_owned.as_deref()) {
             error!(%hn_id, error = %e, "failed to set {} status", status);
         }
         if !ok {
-            let _ = db::increment_retry_count(&conn, hn_id);
+            let _ = db::increment_retry_count(conn, hn_id);
         }
-    }
+    }).await;
 
     info!(%hn_id, ok, "reprocess complete");
 }
 
 /// Re-process any posts left in `pending` status from a previous crash.
 async fn recover_pending_posts(state: &AppState) {
-    let pending = {
-        let conn = state.db.lock().expect("db lock");
-        db::get_pending_posts(&conn).unwrap_or_default()
-    };
+    let pending = with_db(&state.db, |conn| {
+        db::get_pending_posts(conn).unwrap_or_default()
+    }).await;
 
     if pending.is_empty() {
         return;
@@ -664,28 +663,20 @@ async fn recover_pending_posts(state: &AppState) {
     info!(count = pending.len(), "recovering posts left in pending state");
 
     for (hn_id, title, url) in pending {
-        let post_id = {
-            let conn = state.db.lock().expect("db lock");
-            let mut stmt = match conn.prepare("SELECT id FROM posts WHERE hn_id = ?1") {
-                Ok(s) => s,
-                Err(e) => {
-                    error!(%hn_id, error = %e, "failed to query post_id for recovery");
-                    continue;
-                }
-            };
-            match stmt.query_row(rusqlite::params![hn_id], |row| row.get::<_, i64>(0)) {
-                Ok(id) => id,
-                Err(e) => {
-                    error!(%hn_id, error = %e, "post not found for recovery");
-                    continue;
-                }
+        let _post_id = match with_db(&state.db, move |conn| {
+            conn.prepare("SELECT id FROM posts WHERE hn_id = ?1")
+                .and_then(|mut stmt| stmt.query_row(rusqlite::params![hn_id], |row| row.get::<_, i64>(0)))
+        }).await {
+            Ok(id) => id,
+            Err(e) => {
+                error!(%hn_id, error = %e, "post not found for recovery");
+                continue;
             }
         };
 
         info!(%hn_id, "recovering pending post");
         let (ok, error_msg) = fetch_and_summarize(
             state,
-            post_id,
             hn_id,
             &title,
             url.as_deref(),
@@ -694,17 +685,16 @@ async fn recover_pending_posts(state: &AppState) {
         )
         .await;
 
-        {
-            let conn = state.db.lock().expect("db lock");
-            let status = if ok { "done" } else { "error" };
-            let error_msg = if ok { None } else { Some(error_msg.as_str()) };
-            if let Err(e) = db::update_fetch_status(&conn, hn_id, status, error_msg) {
+        let status: &'static str = if ok { "done" } else { "error" };
+        let error_msg_owned: Option<String> = if ok { None } else { Some(error_msg) };
+        with_db(&state.db, move |conn| {
+            if let Err(e) = db::update_fetch_status(conn, hn_id, status, error_msg_owned.as_deref()) {
                 error!(%hn_id, error = %e, "failed to set recovery status");
             }
             if !ok {
-                let _ = db::increment_retry_count(&conn, hn_id);
+                let _ = db::increment_retry_count(conn, hn_id);
             }
-        }
+        }).await;
 
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
@@ -715,10 +705,9 @@ async fn recover_pending_posts(state: &AppState) {
 /// Retry posts that previously ended in `error` status, up to `MAX_RETRIES` times.
 /// Returns the number of posts retried.
 async fn retry_errored_posts(state: &AppState) -> usize {
-    let errored = {
-        let conn = state.db.lock().expect("db lock");
-        db::get_errored_posts(&conn, MAX_RETRIES).unwrap_or_default()
-    };
+    let errored = with_db(&state.db, |conn| {
+        db::get_errored_posts(conn, MAX_RETRIES).unwrap_or_default()
+    }).await;
 
     if errored.is_empty() {
         return 0;
@@ -726,24 +715,19 @@ async fn retry_errored_posts(state: &AppState) -> usize {
 
     info!(count = errored.len(), "retrying errored posts");
 
-    for (hn_id, title, url) in &errored {
-        let (post_id, current_retry_count) = {
-            let conn = state.db.lock().expect("db lock");
-            let mut stmt = match conn.prepare("SELECT id, retry_count FROM posts WHERE hn_id = ?1") {
-                Ok(s) => s,
-                Err(e) => {
-                    error!(%hn_id, error = %e, "failed to query post for retry");
-                    continue;
-                }
-            };
-            match stmt.query_row(rusqlite::params![hn_id], |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
-            }) {
-                Ok((id, rc)) => (id, rc),
-                Err(e) => {
-                    error!(%hn_id, error = %e, "post not found for retry");
-                    continue;
-                }
+    for (hn_id_ref, title, url) in &errored {
+        let hn_id = *hn_id_ref;
+
+        let (_post_id, current_retry_count) = match with_db(&state.db, move |conn| {
+            conn.prepare("SELECT id, retry_count FROM posts WHERE hn_id = ?1")
+                .and_then(|mut stmt| stmt.query_row(rusqlite::params![hn_id], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+                }))
+        }).await {
+            Ok((id, rc)) => (id, rc),
+            Err(e) => {
+                error!(%hn_id, error = %e, "post not found for retry");
+                continue;
             }
         };
 
@@ -751,8 +735,7 @@ async fn retry_errored_posts(state: &AppState) -> usize {
 
         let (ok, error_msg) = fetch_and_summarize(
             state,
-            post_id,
-            *hn_id,
+            hn_id,
             title,
             url.as_deref(),
             &state.config.article,
@@ -760,17 +743,16 @@ async fn retry_errored_posts(state: &AppState) -> usize {
         )
         .await;
 
-        {
-            let conn = state.db.lock().expect("db lock");
-            let status = if ok { "done" } else { "error" };
-            let error_msg = if ok { None } else { Some(error_msg.as_str()) };
-            if let Err(e) = db::update_fetch_status(&conn, *hn_id, status, error_msg) {
+        let status: &'static str = if ok { "done" } else { "error" };
+        let error_msg_owned: Option<String> = if ok { None } else { Some(error_msg) };
+        with_db(&state.db, move |conn| {
+            if let Err(e) = db::update_fetch_status(conn, hn_id, status, error_msg_owned.as_deref()) {
                 error!(%hn_id, error = %e, "failed to set retry status");
             }
             if !ok {
-                let _ = db::increment_retry_count(&conn, *hn_id);
+                let _ = db::increment_retry_count(conn, hn_id);
             }
-        }
+        }).await;
 
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
@@ -782,7 +764,6 @@ async fn retry_errored_posts(state: &AppState) -> usize {
 /// the error message describes which steps failed.
 async fn fetch_and_summarize(
     state: &AppState,
-    post_id: i64,
     hn_id: i64,
     title: &str,
     url: Option<&str>,
@@ -873,11 +854,18 @@ async fn fetch_and_summarize(
     let mut ok = true;
     let mut errors: Vec<&str> = Vec::new();
 
+    let model = llm_config.model.clone();
+
     if let Some(ref summary) = post_result {
-        let conn = state.db.lock().expect("db lock");
-        if let Err(e) = db::insert_summary(&conn, post_id, "post", summary, &llm_config.model) {
-            error!(%hn_id, error = %e, "failed to insert post summary");
-        }
+        let summary_owned = summary.clone();
+        let model = model.clone();
+        with_db(&state.db, move |conn| {
+            if let Ok(Some((current_id, _))) = db::get_post_by_hn_id(conn, hn_id) {
+                if let Err(e) = db::insert_summary(conn, current_id, "post", &summary_owned, &model) {
+                    error!(%hn_id, error = %e, "failed to insert post summary");
+                }
+            }
+        }).await;
     } else if post_attempted {
         error!(%hn_id, "post story text summary failed");
         ok = false;
@@ -885,10 +873,15 @@ async fn fetch_and_summarize(
     }
 
     if let Some(ref summary) = comments_result {
-        let conn = state.db.lock().expect("db lock");
-        if let Err(e) = db::insert_summary(&conn, post_id, "comments", summary, &llm_config.model) {
-            error!(%hn_id, error = %e, "failed to insert comments summary");
-        }
+        let summary_owned = summary.clone();
+        let model = model.clone();
+        with_db(&state.db, move |conn| {
+            if let Ok(Some((current_id, _))) = db::get_post_by_hn_id(conn, hn_id) {
+                if let Err(e) = db::insert_summary(conn, current_id, "comments", &summary_owned, &model) {
+                    error!(%hn_id, error = %e, "failed to insert comments summary");
+                }
+            }
+        }).await;
     } else if comments_attempted {
         error!(%hn_id, "comments summary failed");
         ok = false;
@@ -896,10 +889,14 @@ async fn fetch_and_summarize(
     }
 
     if let Some(ref summary) = article_result {
-        let conn = state.db.lock().expect("db lock");
-        if let Err(e) = db::insert_summary(&conn, post_id, "article", summary, &llm_config.model) {
-            error!(%hn_id, error = %e, "failed to insert article summary");
-        }
+        let summary_owned = summary.clone();
+        with_db(&state.db, move |conn| {
+            if let Ok(Some((current_id, _))) = db::get_post_by_hn_id(conn, hn_id) {
+                if let Err(e) = db::insert_summary(conn, current_id, "article", &summary_owned, &model) {
+                    error!(%hn_id, error = %e, "failed to insert article summary");
+                }
+            }
+        }).await;
     } else if article_attempted {
         error!(%hn_id, "article summary failed");
         ok = false;

@@ -8,9 +8,16 @@ const ARTICLE_MAX_CHARS: usize = 80_000;
 struct ChatRequest {
     model: String,
     messages: Vec<Message>,
-    temperature: f32,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<u32>,
+    reasoning_effort: String,
+    thinking: ThinkingConfig,
+}
+
+#[derive(serde::Serialize)]
+struct ThinkingConfig {
+    #[serde(rename = "type")]
+    type_: String,
 }
 
 #[derive(serde::Serialize)]
@@ -123,8 +130,9 @@ async fn chat_completion(
                 content: user_content.to_string(),
             },
         ],
-        temperature: 0.3,
         max_tokens: Some(512),
+        reasoning_effort: "high".into(),
+        thinking: ThinkingConfig { type_: "enabled".into() },
     };
 
     let log_content = if user_content.len() > 500 {
@@ -135,8 +143,8 @@ async fn chat_completion(
     info!(
         hn_id,
         model = %config.model,
-        temperature = body.temperature,
         max_tokens = ?body.max_tokens,
+        reasoning_effort = %body.reasoning_effort,
         system_prompt = %system_prompt,
         user_content = %log_content,
         "ai request"

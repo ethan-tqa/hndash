@@ -191,6 +191,25 @@ pub fn delete_summaries_for_post(conn: &Connection, hn_id: i64) -> Result<()> {
     Ok(())
 }
 
+/// Return all posts with `fetch_status = 'pending'` (left over from a crash).
+pub fn get_pending_posts(conn: &Connection) -> Result<Vec<(i64, String, Option<String>)>> {
+    let mut stmt = conn.prepare(
+        "SELECT hn_id, title, url FROM posts WHERE fetch_status = 'pending'",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, Option<String>>(2)?,
+        ))
+    })?;
+    let mut posts = Vec::new();
+    for row in rows {
+        posts.push(row?);
+    }
+    Ok(posts)
+}
+
 /// Remove a single post (and all its summaries via CASCADE).
 pub fn delete_post(conn: &Connection, hn_id: i64) -> Result<()> {
     conn.execute("DELETE FROM posts WHERE hn_id = ?1", params![hn_id])?;

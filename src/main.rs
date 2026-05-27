@@ -79,6 +79,9 @@ async fn main() {
     let addr = format!("{}:{}", state.config.server.host, state.config.server.port);
     info!("Listening on {}", addr);
 
+    // Recover any posts left in "pending" from a previous crash
+    recover_pending_posts(&state).await;
+
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .expect("Failed to bind");
@@ -389,6 +392,64 @@ async fn reprocess_post(state: &AppState, hn_id: i64) {
     }
 
     info!(%hn_id, ok, "reprocess complete");
+}
+
+/// Re-process any posts left in `pending` status from a previous crash.
+async fn recover_pending_posts(state: &AppState) {
+    let pending = {
+        let conn = state.db.lock().expect("db lock");
+        db::get_pending_posts(&conn).unwrap_or_default()
+    };
+
+    if pending.is_empty() {
+        return;
+    }
+
+    info!(count = pending.len(), "recovering posts left in pending state");
+
+    for (hn_id, title, url) in pending {
+        let post_id = {
+            let conn = state.db.lock().expect("db lock");
+            let mut stmt = match conn.prepare("SELECT id FROM posts WHERE hn_id = ?1") {
+                Ok(s) => s,
+                Err(e) => {
+                    error!(%hn_id, error = %e, "failed to query post_id for recovery");
+                    continue;
+                }
+            };
+            match stmt.query_row(rusqlite::params![hn_id], |row| row.get::<_, i64>(0)) {
+                Ok(id) => id,
+                Err(e) => {
+                    error!(%hn_id, error = %e, "post not found for recovery");
+                    continue;
+                }
+            }
+        };
+
+        info!(%hn_id, "recovering pending post");
+        let ok = fetch_and_summarize(
+            state,
+            post_id,
+            hn_id,
+            &title,
+            url.as_deref(),
+            &state.config.article,
+            &state.config.llm,
+        )
+        .await;
+
+        {
+            let conn = state.db.lock().expect("db lock");
+            let status = if ok { "done" } else { "error" };
+            if let Err(e) = db::update_fetch_status(&conn, hn_id, status) {
+                error!(%hn_id, error = %e, "failed to set recovery status");
+            }
+        }
+
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+
+    info!("pending post recovery complete");
 }
 
 /// Returns `true` if all critical steps succeeded (post summary, comments summary,

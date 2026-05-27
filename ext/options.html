@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Tab Closer Options</title>
+  <link rel="stylesheet" href="options.css" />
+</head>
+<body>
+  <h1>Tab Closer</h1>
+  <p>Enter URL patterns to close (one per line). Any tab whose URL contains a matching string will be closed automatically.</p>
+  <textarea id="patterns" rows="10" placeholder="example.com"></textarea>
+  <div class="actions">
+    <button id="save">Save</button>
+    <button id="scan">Scan All Tabs</button>
+    <span id="status"></span>
+  </div>
+  <script src="options.js"></script>
+</body>
+</html>

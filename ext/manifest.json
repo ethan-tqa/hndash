@@ -1,0 +1,18 @@
+{
+  "manifest_version": 3,
+  "name": "Tab Closer",
+  "version": "1.0",
+  "description": "Automatically closes tabs whose URL contains any blocked string.",
+  "permissions": ["tabs", "storage"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": false
+  },
+  "action": {
+    "default_title": "Tab Closer",
+    "default_popup": "options.html"
+  }
+}

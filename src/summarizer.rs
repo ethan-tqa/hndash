@@ -1,3 +1,5 @@
+use tracing::{info, warn};
+
 const POST_MAX_CHARS: usize = 8_000;
 const COMMENTS_MAX_CHARS: usize = 40_000;
 const ARTICLE_MAX_CHARS: usize = 80_000;
@@ -39,6 +41,7 @@ pub async fn summarize_post(
     config: &crate::models::LlmConfig,
     title: &str,
     text: Option<&str>,
+    hn_id: i64,
 ) -> Option<String> {
     let content = match text {
         Some(t) => format!("Title: {}\n\nText: {}", title, t),
@@ -52,6 +55,7 @@ pub async fn summarize_post(
         "You are a helpful assistant that summarizes HackerNews posts. \
          Provide a concise 2-3 sentence summary of the post.",
         &content,
+        hn_id,
     )
     .await
 }
@@ -61,18 +65,20 @@ pub async fn summarize_comments(
     client: &reqwest::Client,
     config: &crate::models::LlmConfig,
     comments_text: &str,
+    hn_id: i64,
 ) -> Option<String> {
     let content = truncate(comments_text, COMMENTS_MAX_CHARS);
 
-    chat_completion(
-        client,
-        config,
-        "You are a helpful assistant that summarizes HackerNews comments. \
-         Provide a concise 2-3 sentence summary of the key points \
-         and opinions expressed in these comments.",
-        &content,
-    )
-    .await
+        chat_completion(
+            client,
+            config,
+            "You are a helpful assistant that summarizes HackerNews comments. \
+             Provide a concise 2-3 sentence summary of the key points \
+             and opinions expressed in these comments.",
+            &content,
+            hn_id,
+        )
+        .await
 }
 
 /// Summarize extracted article text via the DeepSeek API.
@@ -80,17 +86,19 @@ pub async fn summarize_article(
     client: &reqwest::Client,
     config: &crate::models::LlmConfig,
     article_text: &str,
+    hn_id: i64,
 ) -> Option<String> {
     let content = truncate(article_text, ARTICLE_MAX_CHARS);
 
-    chat_completion(
-        client,
-        config,
-        "You are a helpful assistant that summarizes articles. \
-         Provide a concise 2-3 sentence summary of the article.",
-        &content,
-    )
-    .await
+        chat_completion(
+            client,
+            config,
+            "You are a helpful assistant that summarizes articles. \
+             Provide a concise 2-3 sentence summary of the article.",
+            &content,
+            hn_id,
+        )
+        .await
 }
 
 async fn chat_completion(
@@ -98,6 +106,7 @@ async fn chat_completion(
     config: &crate::models::LlmConfig,
     system_prompt: &str,
     user_content: &str,
+    hn_id: i64,
 ) -> Option<String> {
     let url = format!("{}/v1/chat/completions", config.base_url.trim_end_matches('/'));
 
@@ -117,21 +126,57 @@ async fn chat_completion(
         max_tokens: Some(512),
     };
 
-    let resp = client
+    let log_content = if user_content.len() > 500 {
+        format!("{}... (truncated)", &user_content[..500])
+    } else {
+        user_content.to_string()
+    };
+    info!(
+        hn_id,
+        model = %config.model,
+        temperature = body.temperature,
+        max_tokens = ?body.max_tokens,
+        system_prompt = %system_prompt,
+        user_content = %log_content,
+        "ai request"
+    );
+
+    let resp = match client
         .post(&url)
         .header("Authorization", format!("Bearer {}", config.api_key))
         .json(&body)
         .send()
         .await
-        .ok()?;
+    {
+        Ok(r) => r,
+        Err(e) => {
+            warn!(hn_id, error = %e, "ai request failed");
+            return None;
+        }
+    };
 
-    let chat: ChatResponse = resp.json().await.ok()?;
-    let content = chat.choices.into_iter().next()?.message.content;
+    let chat: ChatResponse = match resp.json().await {
+        Ok(c) => c,
+        Err(e) => {
+            warn!(hn_id, error = %e, "ai response parse failed");
+            return None;
+        }
+    };
+
+    let content = match chat.choices.into_iter().next() {
+        Some(c) => c.message.content,
+        None => {
+            warn!(hn_id, "ai response no choices");
+            return None;
+        }
+    };
 
     if content.trim().is_empty() {
+        warn!(hn_id, "ai response empty");
         return None;
     }
 
+    info!(hn_id, response = %content, "ai response");
     Some(content)
 }
 

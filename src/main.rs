@@ -433,25 +433,35 @@ async fn fetch_and_summarize(
 
     let mut ok = true;
 
-    info!(%hn_id, "summarizing post");
-    let post_ok = summarizer::summarize_post(&state.http_client, llm_config, title, None).await;
-    if let Some(ref summary) = post_ok {
-        let conn = state.db.lock().expect("db lock");
-        if let Err(e) = db::insert_summary(&conn, post_id, "post", summary, &llm_config.model) {
-            error!(%hn_id, error = %e, "failed to insert post summary");
+    let story_text = item.as_ref()
+        .and_then(|i| i.text.as_deref())
+        .filter(|s| !s.is_empty());
+
+    if let Some(story) = story_text {
+        info!(%hn_id, "summarizing post story text");
+        let post_ok = summarizer::summarize_post(
+            &state.http_client, llm_config, title, Some(story), hn_id
+        ).await;
+        if let Some(ref summary) = post_ok {
+            let conn = state.db.lock().expect("db lock");
+            if let Err(e) = db::insert_summary(&conn, post_id, "post", summary, &llm_config.model) {
+                error!(%hn_id, error = %e, "failed to insert post summary");
+            }
+        } else {
+            error!(%hn_id, "post story text summary failed");
+            ok = false;
         }
     } else {
-        error!(%hn_id, "post summary failed");
-        ok = false;
+        info!(%hn_id, "no story text to summarize, skipping post summary");
     }
 
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
 
     if let Some(ref text) = comments_text {
         if !text.is_empty() && text.len() > 10 {
             info!(%hn_id, "summarizing comments");
             let comments_ok =
-                summarizer::summarize_comments(&state.http_client, llm_config, text).await;
+                summarizer::summarize_comments(&state.http_client, llm_config, text, hn_id).await;
             if let Some(ref summary) = comments_ok {
                 let conn = state.db.lock().expect("db lock");
                 if let Err(e) = db::insert_summary(
@@ -470,13 +480,13 @@ async fn fetch_and_summarize(
         }
     }
 
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
 
     if let Some(ref text) = article_text {
         if !text.is_empty() {
             info!(%hn_id, "summarizing article");
             let article_ok =
-                summarizer::summarize_article(&state.http_client, llm_config, text).await;
+                summarizer::summarize_article(&state.http_client, llm_config, text, hn_id).await;
             if let Some(ref summary) = article_ok {
                 let conn = state.db.lock().expect("db lock");
                 if let Err(e) = db::insert_summary(

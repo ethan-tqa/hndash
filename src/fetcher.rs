@@ -48,6 +48,8 @@ pub struct ItemResponse {
     pub created_at: Option<String>,
     #[serde(default)]
     pub children: Vec<Comment>,
+    #[serde(default)]
+    pub text: Option<String>,
 }
 
 /// A single HN comment with optional nested replies.
@@ -57,9 +59,11 @@ pub struct Comment {
     #[serde(default)]
     pub author: Option<String>,
     #[serde(default)]
-    pub text: Option<String>,
+    pub created_at: Option<String>,
     #[serde(default)]
     pub children: Vec<Comment>,
+    #[serde(default)]
+    pub text: Option<String>,
 }
 
 /// Build the Algolia search URL with numeric filters for a given page.

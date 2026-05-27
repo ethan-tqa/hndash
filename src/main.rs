@@ -3,6 +3,7 @@ mod config;
 mod db;
 mod fetcher;
 mod models;
+mod search;
 mod summarizer;
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -29,6 +30,7 @@ type AppStateRef = Arc<AppState>;
 
 struct AppState {
     db: Arc<Mutex<Connection>>,
+    search_index: Arc<search::SearchIndex>,
     fetch_in_progress: AtomicBool,
     http_client: reqwest::Client,
     config: Config,
@@ -92,8 +94,13 @@ async fn main() {
         .add_template_owned("import.html", import_content)
         .expect("Failed to add import template");
 
+    let search_index_path = format!("{}_search_index", cfg.db.path.trim_end_matches(".db"));
+    let search_index = Arc::new(search::SearchIndex::new(&search_index_path)
+        .expect("Failed to initialize search index"));
+
     let state = Arc::new(AppState {
         db: Arc::new(Mutex::new(conn)),
+        search_index,
         fetch_in_progress: AtomicBool::new(false),
         http_client,
         config: cfg,
@@ -131,14 +138,15 @@ async fn main() {
         });
     }
 
-    // Rebuild FTS5 search index in background
-    let state_clone = state.clone();
-    tokio::spawn(async move {
-        info!("rebuilding FTS search index");
-        with_db(&state_clone.db, |conn| db::rebuild_search_index(conn)).await.unwrap_or_else(|e| {
-            warn!(error = %e, "FTS rebuild failed (non-fatal)");
+    // Rebuild Tantivy search index before accepting requests
+    let index_for_rebuild = state.search_index.clone();
+    let db_for_rebuild = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        let conn = db_for_rebuild.lock().expect("db lock");
+        index_for_rebuild.rebuild(&conn).unwrap_or_else(|e| {
+            warn!(error = %e, "Tantivy rebuild failed (non-fatal)");
         });
-    });
+    }).await.expect("blocking task panicked");
 
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
@@ -306,8 +314,9 @@ async fn mark_all_read(state: State<AppStateRef>) -> impl IntoResponse {
 }
 
 async fn remove_all_posts(state: State<AppStateRef>) -> impl IntoResponse {
-    match with_db(&state.db, |conn| {
-        db::clear_search_index(conn)?;
+    let search_idx = state.search_index.clone();
+    match with_db(&state.db, move |conn| {
+        search_idx.clear();
         db::delete_all_posts(conn)
     }).await {
         Ok(_) => (StatusCode::OK, "All posts removed").into_response(),
@@ -322,12 +331,13 @@ async fn remove_post(
     state: State<AppStateRef>,
     Path(hn_id): Path<i64>,
 ) -> impl IntoResponse {
+    let search_idx = state.search_index.clone();
     match with_db(&state.db, move |conn| {
         let post_id: Option<i64> = conn
             .query_row("SELECT id FROM posts WHERE hn_id = ?1", rusqlite::params![hn_id], |row| row.get(0))
             .ok();
         if let Some(pid) = post_id {
-            db::remove_from_search_index(conn, pid)?;
+            search_idx.remove(pid);
         }
         db::delete_post(conn, hn_id)
     }).await {
@@ -452,18 +462,24 @@ async fn search(
         .max(1);
     let per_page: i64 = 20;
 
+    let db = state.db.clone();
+    let search_idx = state.search_index.clone();
     let query_in_closure = query.clone();
-    let (posts, total_posts) = match with_db(&state.db, move |conn| {
-        db::search_posts(conn, &query_in_closure, page, per_page)
-    }).await {
+    let raw_result = tokio::task::spawn_blocking(move || {
+        let conn = db.lock().expect("db lock");
+        search_idx.search(&query_in_closure, page as usize, per_page as usize, &conn)
+    }).await.expect("blocking task panicked");
+
+    let (posts, total_posts): (Vec<_>, usize) = match raw_result {
         Ok(result) => result,
         Err(e) => {
             error!(error = %e, query = %query, "search failed");
-            (Vec::new(), 0i64)
+            (Vec::new(), 0)
         }
     };
+    let total_posts_i64 = total_posts as i64;
 
-    let total_pages = (total_posts + per_page - 1) / per_page;
+    let total_pages = (total_posts_i64 + per_page - 1) / per_page;
     let page_range: Vec<i64> = (1..=total_pages.max(1)).collect();
 
     let ctx = serde_json::json!({
@@ -540,12 +556,13 @@ async fn process_import_queue(state: &AppState) {
                     let author_owned = author.to_string();
                     let article_url_owned = article_url.map(|s| s.to_string());
 
+                    let search_idx = state.search_index.clone();
                     let _post_id = match with_db(&state.db, move |conn| {
                         let id = db::upsert_post(
                             conn, hn_id, &title_owned, article_url_owned.as_deref(),
                             &author_owned, points, num_comments, &created_at,
                         )?;
-                        db::upsert_search_index(conn, id)?;
+                        search_idx.upsert(conn, id);
                         let _ = db::update_fetch_status(conn, hn_id, "pending", None);
                         Ok::<_, rusqlite::Error>(id)
                     }).await {
@@ -674,9 +691,10 @@ async fn process_post(state: &AppState, hit: &fetcher::SearchHit, hn_id: i64) {
     let author_owned = author.to_string();
     let url_owned = url.map(|s| s.to_string());
 
+    let search_idx = state.search_index.clone();
     let _post_id = match with_db(&state.db, move |conn| {
         let id = db::upsert_post(conn, hn_id, &title_owned, url_owned.as_deref(), &author_owned, points, num_comments, &created_at)?;
-        db::upsert_search_index(conn, id)?;
+        search_idx.upsert(conn, id);
         if let Err(e) = db::update_fetch_status(conn, hn_id, "pending", None) {
             error!(%hn_id, error = %e, "failed to set pending status");
         }
@@ -943,15 +961,18 @@ async fn fetch_and_summarize(
 
     let model = llm_config.model.clone();
 
+    let search_idx = state.search_index.clone();
+
     if let Some(ref summary) = post_result {
         let summary_owned = summary.clone();
         let model = model.clone();
+        let search_idx = search_idx.clone();
         with_db(&state.db, move |conn| {
                     if let Ok(Some((current_id, _))) = db::get_post_by_hn_id(conn, hn_id) {
                         if let Err(e) = db::insert_summary(conn, current_id, "post", &summary_owned, &model) {
                             error!(%hn_id, error = %e, "failed to insert post summary");
                         }
-                        db::upsert_search_index(conn, current_id).ok();
+                        search_idx.upsert(conn, current_id);
                     }
                 }).await;
             } else if post_attempted {
@@ -963,12 +984,13 @@ async fn fetch_and_summarize(
     if let Some(ref summary) = comments_result {
         let summary_owned = summary.clone();
         let model = model.clone();
+        let search_idx = search_idx.clone();
         with_db(&state.db, move |conn| {
                     if let Ok(Some((current_id, _))) = db::get_post_by_hn_id(conn, hn_id) {
                         if let Err(e) = db::insert_summary(conn, current_id, "comments", &summary_owned, &model) {
                             error!(%hn_id, error = %e, "failed to insert comments summary");
                         }
-                        db::upsert_search_index(conn, current_id).ok();
+                        search_idx.upsert(conn, current_id);
                     }
                 }).await;
             } else if comments_attempted {
@@ -979,12 +1001,13 @@ async fn fetch_and_summarize(
 
     if let Some(ref summary) = article_result {
         let summary_owned = summary.clone();
+        let search_idx = search_idx.clone();
         with_db(&state.db, move |conn| {
                     if let Ok(Some((current_id, _))) = db::get_post_by_hn_id(conn, hn_id) {
                         if let Err(e) = db::insert_summary(conn, current_id, "article", &summary_owned, &model) {
                             error!(%hn_id, error = %e, "failed to insert article summary");
                         }
-                        db::upsert_search_index(conn, current_id).ok();
+                        search_idx.upsert(conn, current_id);
                     }
         }).await;
     } else if article_attempted {

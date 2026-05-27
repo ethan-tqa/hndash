@@ -13,7 +13,7 @@ const MAX_RETRIES: i64 = 3;
 
 use std::collections::HashMap;
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{Form, Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse};
 use axum::routing::{get, post};
@@ -54,12 +54,17 @@ async fn main() {
         .build()
         .expect("Failed to create HTTP client");
 
-    let template_content =
+    let index_content =
         std::fs::read_to_string("templates/index.html").expect("Failed to read template");
+    let import_content =
+        std::fs::read_to_string("templates/import.html").expect("Failed to read import template");
     let mut templates = minijinja::Environment::new();
     templates
-        .add_template_owned("index.html", template_content)
+        .add_template_owned("index.html", index_content)
         .expect("Failed to add template");
+    templates
+        .add_template_owned("import.html", import_content)
+        .expect("Failed to add import template");
 
     let state = Arc::new(AppState {
         db: Mutex::new(conn),
@@ -78,6 +83,7 @@ async fn main() {
         .route("/mark-read-all", post(mark_all_read))
         .route("/remove-all-posts", post(remove_all_posts))
         .route("/remove-post/{hn_id}", post(remove_post))
+        .route("/import", get(import_page).post(import_submit))
         .with_state(state.clone());
 
     let addr = format!("{}:{}", state.config.server.host, state.config.server.port);
@@ -85,6 +91,19 @@ async fn main() {
 
     // Recover any posts left in "pending" from a previous crash
     recover_pending_posts(&state).await;
+
+    // Recover any import queue items stuck in "processing" from a previous crash
+    let pending_imports = {
+        let conn = state.db.lock().expect("db lock");
+        db::reset_stuck_imports(&conn).unwrap_or(0)
+    };
+    if pending_imports > 0 {
+        info!(pending_imports, "resuming import queue");
+        let state_clone = state.clone();
+        tokio::spawn(async move {
+            process_import_queue(&state_clone).await;
+        });
+    }
 
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
@@ -271,6 +290,194 @@ async fn remove_post(
             error!(%hn_id, error = %e, "failed to remove post");
             (StatusCode::INTERNAL_SERVER_ERROR, "Failed to remove post").into_response()
         }
+    }
+}
+
+// ── Import page ─────────────────────────────────────────────
+
+fn extract_hn_ids(text: &str) -> Vec<i64> {
+    text.lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty() {
+                return None;
+            }
+            if let Ok(id) = line.parse::<i64>() {
+                return Some(id);
+            }
+            let pos = line.find("id=")?;
+            let after = &pos + 3..;
+            let id_str: String = line[after]
+                .chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect();
+            id_str.parse::<i64>().ok()
+        })
+        .collect()
+}
+
+async fn import_page(state: State<AppStateRef>) -> impl IntoResponse {
+    let queue = {
+        let conn = state.db.lock().expect("db lock");
+        db::get_all_imports(&conn).unwrap_or_default()
+    };
+
+    let ctx = serde_json::json!({
+        "queue": queue,
+        "pasted_text": "",
+        "imported_count": 0,
+    });
+
+    match state.templates.get_template("import.html") {
+        Ok(tmpl) => match tmpl.render(ctx) {
+            Ok(html) => Html(html).into_response(),
+            Err(e) => {
+                error!(error = %e, "import template render failed");
+                (StatusCode::INTERNAL_SERVER_ERROR, "Template error").into_response()
+            }
+        },
+        Err(e) => {
+            error!(error = %e, "import template not found");
+            (StatusCode::INTERNAL_SERVER_ERROR, "Template error").into_response()
+        }
+    }
+}
+
+async fn import_submit(
+    state: State<AppStateRef>,
+    Form(form): Form<HashMap<String, String>>,
+) -> impl IntoResponse {
+    let pasted = form.get("urls").map(|s| s.as_str()).unwrap_or("");
+    let ids = extract_hn_ids(pasted);
+    let imported_count = {
+        let conn = state.db.lock().expect("db lock");
+        let mut count = 0i64;
+        for id in &ids {
+            let url = format!("https://news.ycombinator.com/item?id={}", id);
+            if db::insert_import_item(&conn, *id, &url).is_ok() {
+                count += 1;
+            }
+        }
+        // Check if there are pending items to process
+        let pending = db::count_pending_imports(&conn).unwrap_or(0);
+        if pending > 0 {
+            let state_clone = state.0.clone();
+            tokio::spawn(async move {
+                process_import_queue(&state_clone).await;
+            });
+        }
+        count
+    };
+
+    let queue = {
+        let conn = state.db.lock().expect("db lock");
+        db::get_all_imports(&conn).unwrap_or_default()
+    };
+
+    let ctx = serde_json::json!({
+        "queue": queue,
+        "pasted_text": pasted,
+        "imported_count": imported_count,
+    });
+
+    match state.templates.get_template("import.html") {
+        Ok(tmpl) => match tmpl.render(ctx) {
+            Ok(html) => Html(html).into_response(),
+            Err(e) => {
+                error!(error = %e, "import template render failed");
+                (StatusCode::INTERNAL_SERVER_ERROR, "Template error").into_response()
+            }
+        },
+        Err(e) => {
+            error!(error = %e, "import template not found");
+            (StatusCode::INTERNAL_SERVER_ERROR, "Template error").into_response()
+        }
+    }
+}
+
+async fn process_import_queue(state: &AppState) {
+    loop {
+        let item = {
+            let conn = state.db.lock().expect("db lock");
+            db::claim_next_import(&conn).unwrap_or(None)
+        };
+
+        let (hn_id, _url) = match item {
+            Some((id, url)) => (id, url),
+            None => break,
+        };
+
+        info!(%hn_id, "importing post");
+
+        let result = {
+            let item = fetcher::fetch_item(&state.http_client, hn_id as u64).await;
+            match item {
+                Some(item) => {
+                    let title = item.title.as_deref().unwrap_or("Untitled");
+                    let author = item.author.as_deref().unwrap_or("unknown");
+                    let points = item.points.unwrap_or(0) as i64;
+                    let num_comments = item.num_comments.unwrap_or(0) as i64;
+                    let created_at = item
+                        .created_at
+                        .as_deref()
+                        .unwrap_or("")
+                        .to_string();
+
+                    let article_url = item.url.as_deref();
+
+                    let post_id = {
+                        let conn = state.db.lock().expect("db lock");
+                        match db::upsert_post(
+                            &conn, hn_id, title, article_url, author, points,
+                            num_comments, &created_at,
+                        ) {
+                            Ok(id) => {
+                                let _ = db::update_fetch_status(&conn, hn_id, "pending", None);
+                                id
+                            }
+                            Err(e) => {
+                                error!(%hn_id, error = %e, "failed to insert imported post");
+                                return;
+                            }
+                        }
+                    };
+
+                    let (ok, _summary_error) = fetch_and_summarize(
+                        state, post_id, hn_id, title, article_url,
+                        &state.config.article, &state.config.llm,
+                    )
+                    .await;
+
+                    let (status, error_msg) = if ok {
+                        ("done".to_string(), None)
+                    } else {
+                        ("error".to_string(), Some("summarization failed"))
+                    };
+
+                    {
+                        let conn = state.db.lock().expect("db lock");
+                        let msg = error_msg.map(|s| s.to_string());
+                        db::update_fetch_status(
+                            &conn, hn_id, &status, msg.as_deref(),
+                        )
+                        .ok();
+                    }
+
+                    (status, None::<String>)
+                }
+                None => {
+                    error!(%hn_id, "failed to fetch item from HN API");
+                    ("error".to_string(), Some("failed to fetch item from HN API".to_string()))
+                }
+            }
+        };
+
+        {
+            let conn = state.db.lock().expect("db lock");
+            db::update_import_status(&conn, hn_id, &result.0, result.1.as_deref()).ok();
+        }
+
+        tokio::time::sleep(Duration::from_millis(500)).await;
     }
 }
 
@@ -589,7 +796,7 @@ async fn fetch_and_summarize(
     });
 
     let article_text = if let Some(u) = url {
-        if !u.is_empty() {
+        if !u.is_empty() && !u.contains("news.ycombinator.com/item?id=") {
             article::fetch_article(article_config, u).await
         } else {
             None

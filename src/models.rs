@@ -79,6 +79,17 @@ pub struct PostSummary {
     pub summaries: Vec<Summary>,
 }
 
+/// An item in the import queue (pasted HN URLs).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImportItem {
+    pub id: i64,
+    pub hn_id: i64,
+    pub url: String,
+    pub status: String,
+    pub error_message: Option<String>,
+    pub created_at: String,
+}
+
 /// Article fetching and text extraction configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArticleConfig {

@@ -44,6 +44,18 @@ pub fn init(path: &str) -> Result<Connection> {
         CREATE INDEX IF NOT EXISTS idx_summaries_post ON summaries(post_id);",
     )?;
 
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS import_queue (
+            id            INTEGER PRIMARY KEY,
+            hn_id         INTEGER UNIQUE NOT NULL,
+            url           TEXT NOT NULL,
+            status        TEXT NOT NULL DEFAULT 'pending'
+                            CHECK(status IN ('pending','processing','done','error')),
+            error_message TEXT,
+            created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+        );",
+    )?;
+
     let _ = conn.execute("ALTER TABLE posts ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0", []);
     let _ = conn.execute("ALTER TABLE posts ADD COLUMN error_message TEXT", []);
 
@@ -281,4 +293,105 @@ pub fn delete_post(conn: &Connection, hn_id: i64) -> Result<()> {
 pub fn delete_all_posts(conn: &Connection) -> Result<()> {
     conn.execute("DELETE FROM posts", [])?;
     Ok(())
+}
+
+// ── Import queue ─────────────────────────────────────────
+
+/// Insert a URL into the import queue (skips if hn_id already exists).
+pub fn insert_import_item(conn: &Connection, hn_id: i64, url: &str) -> Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO import_queue (hn_id, url) VALUES (?1, ?2)",
+        params![hn_id, url],
+    )?;
+    Ok(())
+}
+
+/// Return all import queue items, newest first.
+pub fn get_all_imports(conn: &Connection) -> Result<Vec<crate::models::ImportItem>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, hn_id, url, status, error_message, created_at
+         FROM import_queue ORDER BY created_at DESC",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(crate::models::ImportItem {
+            id: row.get(0)?,
+            hn_id: row.get(1)?,
+            url: row.get(2)?,
+            status: row.get(3)?,
+            error_message: row.get(4)?,
+            created_at: row.get(5)?,
+        })
+    })?;
+    let mut items = Vec::new();
+    for row in rows {
+        items.push(row?);
+    }
+    Ok(items)
+}
+
+/// Claim the oldest pending import (set status to 'processing') and return it.
+pub fn claim_next_import(conn: &Connection) -> Result<Option<(i64, String)>> {
+    let item: Option<(i64, i64, String)> = {
+        let mut stmt = conn.prepare(
+            "SELECT id, hn_id, url FROM import_queue
+             WHERE status = 'pending'
+             ORDER BY created_at ASC LIMIT 1",
+        )?;
+        let mut rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?))
+        })?;
+        match rows.next() {
+            Some(Ok(r)) => Some(r),
+            _ => None,
+        }
+    };
+
+    match item {
+        Some((_id, hn_id, url)) => {
+            conn.execute(
+                "UPDATE import_queue SET status = 'processing' WHERE hn_id = ?1 AND status = 'pending'",
+                params![hn_id],
+            )?;
+            Ok(Some((hn_id, url)))
+        }
+        None => Ok(None),
+    }
+}
+
+/// Update the status and optional error message for an import item.
+pub fn update_import_status(
+    conn: &Connection,
+    hn_id: i64,
+    status: &str,
+    error_message: Option<&str>,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE import_queue SET status = ?1, error_message = ?2 WHERE hn_id = ?3",
+        params![status, error_message, hn_id],
+    )?;
+    Ok(())
+}
+
+/// Count number of pending imports.
+pub fn count_pending_imports(conn: &Connection) -> Result<i64> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM import_queue WHERE status = 'pending' OR status = 'processing'",
+        [],
+        |row| row.get(0),
+    )
+}
+
+/// Reset any import items stuck in 'processing' back to 'pending'
+/// (e.g. after a crash). Returns the number of pending items remaining.
+pub fn reset_stuck_imports(conn: &Connection) -> Result<i64> {
+    conn.execute(
+        "UPDATE import_queue SET status = 'pending', error_message = NULL
+         WHERE status = 'processing'",
+        [],
+    )?;
+    conn.query_row(
+        "SELECT COUNT(*) FROM import_queue WHERE status = 'pending'",
+        [],
+        |row| row.get(0),
+    )
 }

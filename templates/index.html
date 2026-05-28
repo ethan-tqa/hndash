@@ -120,7 +120,7 @@
           </span>
           <span class="post-title-text">
             {% if ps.post.url %}
-              <a href="{{ ps.post.url }}" target="_blank">{{ ps.post.title }}</a>
+              <a href="{{ ps.post.url }}" target="_blank" onclick="event.stopPropagation()">{{ ps.post.title }}</a>
             {% else %}
               {{ ps.post.title }}
             {% endif %}
@@ -128,7 +128,7 @@
         </span>
         <span class="post-info" style="font-size:11px;color:#888;">
           ({{ ps.post.author }} &middot; {{ ps.post.created_at }}
-          &middot; <a href="https://news.ycombinator.com/item?id={{ ps.post.hn_id }}" target="_blank" style="color:#888;">HN</a>)
+          &middot; <a href="https://news.ycombinator.com/item?id={{ ps.post.hn_id }}" target="_blank" style="color:#888;" onclick="event.stopPropagation()">HN</a>)
         </span>
       </span>
       <span class="post-meta">

@@ -60,7 +60,8 @@ pub async fn summarize_post(
         client,
         config,
         "You are a helpful assistant that summarizes HackerNews posts. \
-         Provide a concise 2-3 sentence summary of the post.",
+         Provide a concise 2-3 sentence summary of the post. \
+         Always respond in English.",
         &content,
         hn_id,
     )
@@ -79,9 +80,10 @@ pub async fn summarize_comments(
         chat_completion(
             client,
             config,
-            "You are a helpful assistant that summarizes HackerNews comments. \
-             Provide a concise 3-5 sentence summary of the key points \
-             and opinions expressed in these comments.",
+        "You are a helpful assistant that summarizes HackerNews comments. \
+         Provide a concise 3-5 sentence summary of the key points \
+         and opinions expressed in these comments. \
+         Always respond in English.",
             &content,
             hn_id,
         )
@@ -100,8 +102,9 @@ pub async fn summarize_article(
         chat_completion(
             client,
             config,
-            "You are a helpful assistant that summarizes articles. \
-             Provide a concise 3-5 sentence summary of the article.",
+        "You are a helpful assistant that summarizes articles. \
+         Provide a concise 3-5 sentence summary of the article. \
+         Always respond in English.",
             &content,
             hn_id,
         )

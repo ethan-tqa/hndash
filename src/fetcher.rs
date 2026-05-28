@@ -94,8 +94,8 @@ pub fn search_url(config: &HnConfig, page: u32) -> String {
 
     let numeric = filters.join(",");
     format!(
-        "https://hn.algolia.com/api/v1/search?tags=story&hitsPerPage=50&page={}&numericFilters={}",
-        page,
+        "https://hn.algolia.com/api/v1/search?tags=story&hitsPerPage={}&page={}&numericFilters={}",
+        config.hits_per_page, page,
         urlencoding::encode(&numeric)
     )
 }

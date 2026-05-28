@@ -51,6 +51,12 @@ pub struct HnConfig {
     pub max_age_hours: u64,
     #[serde(default)]
     pub min_age_hours: Option<u64>,
+    #[serde(default = "default_hits_per_page")]
+    pub hits_per_page: u32,
+}
+
+fn default_hits_per_page() -> u32 {
+    50
 }
 
 /// DeepSeek / OpenAI-compatible LLM API configuration.

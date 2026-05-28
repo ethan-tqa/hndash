@@ -3,6 +3,7 @@ min_points = 20
 min_comments = 10
 fetch_interval_minutes = 30
 max_fetch_pages = 5
+hits_per_page = 50    # results per Algolia page
 max_age_hours = 0      # maximum age in hours (0 = no upper bound)
 # min_age_hours = 168  # minimum age in hours (e.g. 168 = at least 1 week old)
 

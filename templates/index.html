@@ -50,6 +50,10 @@
   .page-active:hover { background: #e55c00; }
   .page-disabled { opacity: .4; pointer-events: none; }
 
+  .bottom-bar { display: flex; align-items: center; justify-content: center; gap: 12px; padding: 16px 0; margin-top: 16px; border-top: 1px solid #e0e0d0; flex-wrap: wrap; }
+  .bottom-bar .btn { background: #f0f0e8; color: #444; }
+  .bottom-bar .btn:hover { background: #e0e0d8; }
+
   @media (max-width: 600px) {
     body { padding: 8px; }
     .header { flex-wrap: wrap; gap: 8px; }
@@ -92,12 +96,6 @@
              style="flex:1;padding:4px 8px;border:1px solid rgba(255,255,255,.3);border-radius:3px;background:rgba(255,255,255,.15);color:#fff;font-size:13px;outline:none;">
       <button type="submit" class="btn" style="padding:4px 10px;">Search</button>
     </form>
-    <button class="btn" id="refreshBtn" onclick="triggerRefresh()">Refresh</button>
-    {% if posts %}
-    <button class="btn" onclick="markAllRead()">Mark all read</button>
-    <button class="btn" onclick="apiPost('/remove-all-posts')">Remove all</button>
-    <a class="btn" href="/import" style="background:rgba(255,255,255,.15);">Import</a>
-    {% endif %}
   </div>
 
   {% if query %}
@@ -187,6 +185,15 @@
     <a class="page-btn {% if p == page %}page-active{% endif %}" href="/?page={{ p }}">{{ p }}</a>
     {% endfor %}
     <a class="page-btn {% if page >= total_pages %}page-disabled{% endif %}" href="/?page={{ page + 1 }}">Next</a>
+    {% endif %}
+  </div>
+
+  <div class="bottom-bar">
+    <button class="btn" id="refreshBtn" onclick="triggerRefresh()">Refresh</button>
+    {% if posts %}
+    <button class="btn" onclick="markAllRead()">Mark all read</button>
+    <button class="btn" onclick="apiPost('/remove-all-posts')">Remove all</button>
+    <a class="btn" href="/import">Import</a>
     {% endif %}
   </div>
 </div>

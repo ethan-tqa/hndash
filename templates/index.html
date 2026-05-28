@@ -50,6 +50,11 @@
   .page-active:hover { background: #e55c00; }
   .page-disabled { opacity: .4; pointer-events: none; }
 
+  .filter-bar { display: flex; align-items: center; justify-content: center; gap: 6px; padding: 12px 0 0; }
+  .filter-btn { display: inline-flex; align-items: center; justify-content: center; min-width: 56px; height: 30px; padding: 0 12px; border: 1px solid #d0d0c8; border-radius: 3px; background: #fff; color: #444; font-size: 12px; text-decoration: none; cursor: pointer; }
+  .filter-btn:hover { background: #f0f0e8; }
+  .filter-active { background: #ff6600; border-color: #ff6600; color: #fff; font-weight: 600; }
+  .filter-active:hover { background: #e55c00; }
   .bottom-bar { display: flex; align-items: center; justify-content: center; gap: 12px; padding: 16px 0; margin-top: 16px; border-top: 1px solid #e0e0d0; flex-wrap: wrap; }
   .bottom-bar .btn { background: #f0f0e8; color: #444; }
   .bottom-bar .btn:hover { background: #e0e0d8; }
@@ -169,7 +174,11 @@
     </div>
   </div>
   {% else %}
+  {% if is_unread and total_all > 0 %}
+  <p style="text-align:center;color:#888;margin-top:60px;">No unread posts. <a href="/?filter=all" style="color:#ff6600;">Show all posts</a></p>
+  {% else %}
   <p style="text-align:center;color:#888;margin-top:60px;">No posts yet. Click <strong>Refresh</strong> to fetch stories.</p>
+  {% endif %}
   {% endfor %}
 
   <div class="pagination">
@@ -180,12 +189,18 @@
     {% endfor %}
     <a class="page-btn {% if page >= total_pages %}page-disabled{% endif %}" href="/search?q={{ query | urlencode }}&page={{ page + 1 }}">Next</a>
     {% else %}
-    <a class="page-btn {% if page <= 1 %}page-disabled{% endif %}" href="/?page={{ page - 1 }}">Prev</a>
+    <a class="page-btn {% if page <= 1 %}page-disabled{% endif %}" href="/?page={{ page - 1 }}&filter={{ filter }}">Prev</a>
     {% for p in page_range %}
-    <a class="page-btn {% if p == page %}page-active{% endif %}" href="/?page={{ p }}">{{ p }}</a>
+    <a class="page-btn {% if p == page %}page-active{% endif %}" href="/?page={{ p }}&filter={{ filter }}">{{ p }}</a>
     {% endfor %}
-    <a class="page-btn {% if page >= total_pages %}page-disabled{% endif %}" href="/?page={{ page + 1 }}">Next</a>
+    <a class="page-btn {% if page >= total_pages %}page-disabled{% endif %}" href="/?page={{ page + 1 }}&filter={{ filter }}">Next</a>
     {% endif %}
+  </div>
+
+  <div class="filter-bar">
+    <a class="filter-btn {% if is_unread %}filter-active{% endif %}" href="/?filter=unread">Unread</a>
+    <a class="filter-btn {% if is_read %}filter-active{% endif %}" href="/?filter=read">Read</a>
+    <a class="filter-btn {% if is_all %}filter-active{% endif %}" href="/?filter=all">All</a>
   </div>
 
   <div class="bottom-bar">

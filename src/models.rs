@@ -87,6 +87,25 @@ pub struct PostSummary {
     pub summaries: Vec<Summary>,
 }
 
+/// Filter for dashboard post listing: unread, read, or all.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum ReadFilter {
+    #[default]
+    Unread,
+    Read,
+    All,
+}
+
+impl ReadFilter {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ReadFilter::Unread => "unread",
+            ReadFilter::Read => "read",
+            ReadFilter::All => "all",
+        }
+    }
+}
+
 /// An item in the import queue (pasted HN URLs).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImportItem {

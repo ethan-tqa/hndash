@@ -24,7 +24,7 @@ use tracing::{error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Layer, EnvFilter};
 
 use crate::fetcher::{search_stories, top_comments};
-use crate::models::Config;
+use crate::models::{Config, ReadFilter};
 
 type AppStateRef = Arc<AppState>;
 
@@ -220,11 +220,18 @@ async fn dashboard(
         .max(1);
     let per_page: i64 = 20;
 
-    let (posts, total_posts) = with_db(&state.db, move |conn| {
-        let total = db::count_posts(conn).unwrap_or(0);
+    let filter = match params.get("filter").map(|s| s.as_str()) {
+        Some("read") => ReadFilter::Read,
+        Some("all") => ReadFilter::All,
+        _ => ReadFilter::Unread,
+    };
+
+    let (posts, total_posts, total_all) = with_db(&state.db, move |conn| {
+        let total = db::count_posts(conn, filter).unwrap_or(0);
+        let total_all = db::count_posts(conn, ReadFilter::All).unwrap_or(0);
         let posts =
-            db::query_posts_with_summaries_paginated(conn, page, per_page).unwrap_or_default();
-        (posts, total)
+            db::query_posts_with_summaries_paginated(conn, page, per_page, filter).unwrap_or_default();
+        (posts, total, total_all)
     }).await;
 
     let total_pages = (total_posts + per_page - 1) / per_page;
@@ -237,9 +244,14 @@ async fn dashboard(
         "page": page,
         "total_pages": total_pages,
         "total_posts": total_posts,
+        "total_all": total_all,
         "page_range": page_range,
         "last_fetch_time": last_fetch_time,
         "query": "",
+        "filter": filter.as_str(),
+        "is_unread": filter == ReadFilter::Unread,
+        "is_read": filter == ReadFilter::Read,
+        "is_all": filter == ReadFilter::All,
     });
 
     match state.templates.get_template("index.html") {

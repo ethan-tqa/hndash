@@ -91,10 +91,12 @@
     <h1>hndash</h1>
     <span class="status">
       {% if last_fetch_time %}
-        Last fetch: {{ last_fetch_time }} &middot; {{ posts|length }} posts
+        Last fetch: {{ last_fetch_time }}
       {% else %}
         Not yet fetched
       {% endif %}
+      &middot; {{ total_all }} total
+      &middot; {{ interactions_today }} today
     </span>
     <form action="/search" method="get" style="display:flex;gap:4px;flex:1;max-width:260px;">
       <input type="text" name="q" value="{{ query }}" placeholder="Search posts..."

@@ -235,12 +235,13 @@ async fn dashboard(
         _ => ReadFilter::Unread,
     };
 
-    let (posts, total_posts, total_all) = with_db(&state.db, move |conn| {
+    let (posts, total_posts, total_all, interactions_today) = with_db(&state.db, move |conn| {
         let total = db::count_posts(conn, filter).unwrap_or(0);
         let total_all = db::count_posts(conn, ReadFilter::All).unwrap_or(0);
+        let interactions_today = db::get_interactions_today(conn).unwrap_or(0);
         let posts =
             db::query_posts_with_summaries_paginated(conn, page, per_page, filter).unwrap_or_default();
-        (posts, total, total_all)
+        (posts, total, total_all, interactions_today)
     }).await;
 
     let total_pages = (total_posts + per_page - 1) / per_page;
@@ -254,6 +255,7 @@ async fn dashboard(
         "total_pages": total_pages,
         "total_posts": total_posts,
         "total_all": total_all,
+        "interactions_today": interactions_today,
         "page_range": page_range,
         "last_fetch_time": last_fetch_time,
         "query": "",
@@ -337,7 +339,10 @@ async fn mark_read_post(
     state: State<AppStateRef>,
     Path(hn_id): Path<i64>,
 ) -> impl IntoResponse {
-    match with_db(&state.db, move |conn| db::mark_post_read(conn, hn_id)).await {
+    match with_db(&state.db, move |conn| {
+        db::mark_post_read(conn, hn_id)?;
+        db::increment_interactions(conn)
+    }).await {
         Ok(_) => (StatusCode::OK, "Marked as read").into_response(),
         Err(e) => {
             error!(%hn_id, error = %e, "failed to mark post read");
@@ -347,7 +352,10 @@ async fn mark_read_post(
 }
 
 async fn mark_all_read(state: State<AppStateRef>) -> impl IntoResponse {
-    match with_db(&state.db, |conn| db::mark_all_read(conn)).await {
+    match with_db(&state.db, |conn| {
+        db::mark_all_read(conn)?;
+        db::increment_interactions(conn)
+    }).await {
         Ok(_) => (StatusCode::OK, "All marked as read").into_response(),
         Err(e) => {
             error!(error = %e, "failed to mark all read");
@@ -360,7 +368,8 @@ async fn remove_all_posts(state: State<AppStateRef>) -> impl IntoResponse {
     let search_idx = state.search_index.clone();
     match with_db(&state.db, move |conn| {
         search_idx.clear();
-        db::delete_all_posts(conn)
+        db::delete_all_posts(conn)?;
+        db::increment_interactions(conn)
     }).await {
         Ok(_) => (StatusCode::OK, "All posts removed").into_response(),
         Err(e) => {
@@ -382,7 +391,8 @@ async fn remove_post(
         if let Some(pid) = post_id {
             search_idx.remove(pid);
         }
-        db::delete_post(conn, hn_id)
+        db::delete_post(conn, hn_id)?;
+        db::increment_interactions(conn)
     }).await {
         Ok(_) => (StatusCode::OK, "Post removed").into_response(),
         Err(e) => {

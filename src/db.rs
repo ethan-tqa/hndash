@@ -60,6 +60,18 @@ pub fn init(path: &str) -> Result<Connection> {
     let _ = conn.execute("ALTER TABLE posts ADD COLUMN error_message TEXT", []);
     let _ = conn.execute("ALTER TABLE posts ADD COLUMN permanent_failure INTEGER NOT NULL DEFAULT 0", []);
 
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS daily_stats (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            date TEXT NOT NULL,
+            interactions INTEGER NOT NULL DEFAULT 0
+        );",
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO daily_stats (id, date, interactions) VALUES (1, '', 0)",
+        [],
+    )?;
+
     Ok(conn)
 }
 
@@ -434,4 +446,26 @@ pub fn reset_stuck_imports(conn: &Connection) -> Result<i64> {
         [],
         |row| row.get(0),
     )
+}
+
+/// Increment the daily interaction counter.
+pub fn increment_interactions(conn: &Connection) -> Result<()> {
+    conn.execute(
+        "UPDATE daily_stats SET
+           interactions = CASE WHEN date = date('now') THEN interactions + 1 ELSE 1 END,
+           date = date('now')
+         WHERE id = 1",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Return the number of interactions (reads + deletes) recorded today.
+pub fn get_interactions_today(conn: &Connection) -> Result<i64> {
+    conn.query_row(
+        "SELECT interactions FROM daily_stats WHERE id = 1 AND date = date('now')",
+        [],
+        |row| row.get(0),
+    )
+    .or(Ok(0))
 }

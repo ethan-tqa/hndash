@@ -227,6 +227,7 @@ async fn try_wayback(client: &Client, url: &str, config: &ArticleConfig, hn_id: 
         return Some(text);
     }
 
+    warn!(%url, %hn_id, "no viable wayback snapshot found");
     None
 }
 

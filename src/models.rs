@@ -125,4 +125,6 @@ pub struct ArticleConfig {
     pub max_bytes: usize,
     pub min_text_length: usize,
     pub user_agent: String,
+    #[serde(default)]
+    pub paywalled_domains: Vec<String>,
 }

@@ -42,23 +42,27 @@ fn dump_body(hn_id: i64, source: &str, body: &str) {
 
 /// Fetch an article URL and extract readable text, falling through configured
 /// fallbacks (Jina Reader, Wayback Machine, archive.is, etc.).
-pub async fn fetch_article(config: &ArticleConfig, url: &str, hn_id: i64) -> Option<String> {
+/// When `skip_direct` is true, the initial direct fetch is bypassed and only
+/// fallback methods are attempted.
+pub async fn fetch_article(config: &ArticleConfig, url: &str, hn_id: i64, skip_direct: bool) -> Option<String> {
     let client = Client::builder()
         .timeout(Duration::from_secs(config.timeout_secs))
         .user_agent(&config.user_agent)
         .build()
         .ok()?;
 
-    let html = fetch_url(&client, url, config.max_bytes).await;
-    if let Some(ref html) = html {
-        let text = extract_text(html);
-        if text.len() >= config.min_text_length && !is_low_quality(&text) {
-            return Some(text);
+    if !skip_direct {
+        let html = fetch_url(&client, url, config.max_bytes).await;
+        if let Some(ref html) = html {
+            let text = extract_text(html);
+            if text.len() >= config.min_text_length && !is_low_quality(&text) {
+                return Some(text);
+            }
+            dump_body(hn_id, "original", html);
+            warn!(%url, %hn_id, extracted = text.len(), html_len = html.len(),
+                "original fetch text too short or low quality, body dumped"
+            );
         }
-        dump_body(hn_id, "original", html);
-        warn!(%url, %hn_id, extracted = text.len(), html_len = html.len(),
-            "original fetch text too short or low quality, body dumped"
-        );
     }
 
     for (i, fallback) in config.fallback_order.iter().enumerate() {

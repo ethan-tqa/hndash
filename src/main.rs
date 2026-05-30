@@ -754,22 +754,13 @@ fn is_permanent_failure(url: Option<&str>) -> bool {
     let lower = url.to_lowercase();
 
     // PDF files — can never be text-extracted by the article module
-    if lower.contains(".pdf") {
-        return true;
-    }
+    lower.contains(".pdf") || lower.contains("youtube.com") || lower.contains("youtu.be")
+}
 
-    // YouTube URLs — SPA pages that never yield extractable text
-    if lower.contains("youtube.com") || lower.contains("youtu.be") {
-        return true;
-    }
-
-    // Known hard-paywalled sites that consistently return 403/401
-    let paywalled_domains = [
-        "wsj.com", "bloomberg.com", "nytimes.com", "economist.com",
-        "ft.com", "reuters.com", "newyorker.com", "washingtonpost.com",
-        "forbes.com", "barrons.com",
-    ];
-    paywalled_domains.iter().any(|domain| lower.contains(domain))
+/// Check if a URL belongs to a known hard-paywalled site.
+fn is_paywalled(url: &str, domains: &[String]) -> bool {
+    let lower = url.to_lowercase();
+    domains.iter().any(|domain| lower.contains(domain))
 }
 
 async fn process_post(state: &AppState, hit: &fetcher::SearchHit, hn_id: i64) {
@@ -1013,7 +1004,8 @@ async fn fetch_and_summarize(
 
     let article_text = if let Some(u) = url {
         if !u.is_empty() && !u.contains("news.ycombinator.com/item?id=") {
-            article::fetch_article(article_config, u, hn_id).await
+            let skip_direct = is_paywalled(u, &article_config.paywalled_domains);
+            article::fetch_article(article_config, u, hn_id, skip_direct).await
         } else {
             None
         }

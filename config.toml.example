@@ -21,6 +21,11 @@ path = "hndash.db"
 
 [article]
 fallback_order = ["jina_reader", "web.archive.org", "archive.is"]
+paywalled_domains = [
+    "wsj.com", "bloomberg.com", "nytimes.com", "economist.com",
+    "ft.com", "reuters.com", "newyorker.com", "washingtonpost.com",
+    "forbes.com", "barrons.com",
+]
 timeout_secs = 30
 max_bytes = 204800
 min_text_length = 100

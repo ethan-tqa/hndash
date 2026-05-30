@@ -80,8 +80,8 @@ pub async fn fetch_article(config: &ArticleConfig, url: &str, hn_id: i64, skip_d
                     return Some(text);
                 }
             }
-            "archive.is" => {
-                if let Some(text) = try_archive_is(&client, url, config, hn_id).await {
+            "archive.ph" | "archive.is" => {
+                if let Some(text) = try_archive(&client, url, config, hn_id, fallback).await {
                     return Some(text);
                 }
             }
@@ -129,9 +129,9 @@ async fn fetch_url(client: &Client, url: &str, max_bytes: usize) -> Option<Strin
     Some(body_str)
 }
 
-async fn try_archive_is(client: &Client, url: &str, config: &ArticleConfig, hn_id: i64) -> Option<String> {
+async fn try_archive(client: &Client, url: &str, config: &ArticleConfig, hn_id: i64, domain: &str) -> Option<String> {
     let encoded = urlencoding::encode(url);
-    let archive_url = format!("https://archive.is/newest/{}", encoded);
+    let archive_url = format!("https://{}/newest/{}", domain, encoded);
 
     for attempt in 0..3 {
         let response = client
@@ -154,21 +154,21 @@ async fn try_archive_is(client: &Client, url: &str, config: &ArticleConfig, hn_i
 
         if rate_limited {
             let delay = 5 * (attempt + 1);
-            warn!(%url, attempt, %delay, "archive.is rate limited, retrying after backoff");
+            warn!(%url, %domain, attempt, %delay, "archive rate limited, retrying after backoff");
             tokio::time::sleep(Duration::from_secs(delay)).await;
             continue;
         }
 
         if !status.is_success() {
-            warn!(%url, %status, "archive.is non-success");
+            warn!(%url, %domain, %status, "archive non-success");
             return None;
         }
 
         let text = extract_text(&html);
 
         if is_low_quality(&text) {
-            dump_body(hn_id, "archive_is", &html);
-            warn!(%url, %hn_id, attempt, "archive.is low quality content, body dumped");
+            dump_body(hn_id, domain, &html);
+            warn!(%url, %domain, %hn_id, attempt, "archive low quality content, body dumped");
             continue;
         }
 
@@ -176,9 +176,9 @@ async fn try_archive_is(client: &Client, url: &str, config: &ArticleConfig, hn_i
             return Some(text);
         }
 
-        dump_body(hn_id, "archive_is", &html);
-        warn!(%url, %hn_id, extracted = text.len(), html_len = html.len(),
-            "archive.is text too short or not found, body dumped"
+        dump_body(hn_id, domain, &html);
+        warn!(%url, %domain, %hn_id, extracted = text.len(), html_len = html.len(),
+            "archive text too short or not found, body dumped"
         );
     }
 

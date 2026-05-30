@@ -20,7 +20,7 @@ port = 8080
 path = "hndash.db"
 
 [article]
-fallback_order = ["jina_reader", "web.archive.org", "archive.is"]
+fallback_order = ["jina_reader", "web.archive.org", "archive.ph", "archive.is"]
 paywalled_domains = [
     "wsj.com", "bloomberg.com", "nytimes.com", "economist.com",
     "ft.com", "reuters.com", "newyorker.com", "washingtonpost.com",

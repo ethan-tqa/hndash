@@ -1,4 +1,4 @@
-use tracing::{info, warn};
+use tracing::{debug, warn};
 
 const POST_MAX_CHARS: usize = 8_000;
 const COMMENTS_MAX_CHARS: usize = 40_000;
@@ -144,7 +144,7 @@ async fn chat_completion(
     } else {
         user_content.to_string()
     };
-    info!(
+    debug!(
         hn_id,
         model = %config.model,
         max_tokens = ?body.max_tokens,
@@ -189,7 +189,7 @@ async fn chat_completion(
         return None;
     }
 
-    info!(
+    debug!(
         hn_id,
         duration_ms = start.elapsed().as_millis() as u64,
         response = %content,

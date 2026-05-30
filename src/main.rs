@@ -57,12 +57,21 @@ async fn main() {
     let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
 
     let stdout_layer = tracing_subscriber::fmt::layer()
-        .with_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()));
+        .with_filter({
+            let filter_str = std::env::var("RUST_LOG").unwrap_or_default();
+            if filter_str.is_empty() {
+                EnvFilter::new("tantivy=warn,info")
+            } else if filter_str.contains("tantivy") {
+                EnvFilter::new(&filter_str)
+            } else {
+                EnvFilter::new(format!("tantivy=warn,{}", filter_str))
+            }
+        });
 
     let file_layer = tracing_subscriber::fmt::layer()
         .with_writer(non_blocking)
         .with_ansi(false)
-        .with_filter(EnvFilter::new("warn"));
+        .with_filter(EnvFilter::new("info"));
 
     tracing_subscriber::registry()
         .with(stdout_layer)
@@ -786,10 +795,15 @@ async fn process_post(state: &AppState, hit: &fetcher::SearchHit, hn_id: i64) {
         }
     };
 
-    let (ok, error_msg) = fetch_and_summarize(state, hn_id, title, url, &config.article, &config.llm).await;
+    let perm_fail = is_permanent_failure(url);
+    let (ok, error_msg) = if perm_fail {
+        warn!(%hn_id, %title, "skipping fetch, permanent failure (PDF/paywall/etc.)");
+        (false, "permanent failure".into())
+    } else {
+        fetch_and_summarize(state, hn_id, title, url, &config.article, &config.llm).await
+    };
 
     let status: &'static str = if ok { "done" } else { "error" };
-    let perm_fail = !ok && is_permanent_failure(url);
     let error_msg_owned: Option<String> = if ok { None } else { Some(error_msg) };
     with_db(&state.db, move |conn| {
         if let Err(e) = db::update_fetch_status(conn, hn_id, status, error_msg_owned.as_deref()) {
@@ -989,7 +1003,7 @@ async fn fetch_and_summarize(
 
     let article_text = if let Some(u) = url {
         if !u.is_empty() && !u.contains("news.ycombinator.com/item?id=") {
-            article::fetch_article(article_config, u).await
+            article::fetch_article(article_config, u, hn_id).await
         } else {
             None
         }

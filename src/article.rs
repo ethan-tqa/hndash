@@ -1,3 +1,4 @@
+use std::fs;
 use std::time::Duration;
 
 use reqwest::Client;
@@ -6,9 +7,42 @@ use tracing::warn;
 
 use crate::models::ArticleConfig;
 
+const LOW_QUALITY_PATTERNS: &[&str] = &[
+    "verify you are human",
+    "verify your identity",
+    "captcha",
+    "checking your browser",
+    "cloudflare",
+    "attention required",
+    "please enable cookies",
+    "access denied",
+    "legal reasons",
+    "cannot access",
+    "just a moment...",
+    "challenge platform",
+    "ddos protection",
+    "blocked",
+];
+
+fn is_low_quality(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    LOW_QUALITY_PATTERNS.iter().any(|&p| lower.contains(p))
+}
+
+fn dump_body(hn_id: i64, source: &str, body: &str) {
+    if let Err(e) = fs::create_dir_all("logs/article_dumps") {
+        warn!(%hn_id, %e, "failed to create article dump directory");
+        return;
+    }
+    let path = format!("logs/article_dumps/{}_{}.html", hn_id, source);
+    if let Err(e) = fs::write(&path, body) {
+        warn!(%hn_id, %e, "failed to write article dump");
+    }
+}
+
 /// Fetch an article URL and extract readable text, falling through configured
 /// fallbacks (Jina Reader, Wayback Machine, archive.is, etc.).
-pub async fn fetch_article(config: &ArticleConfig, url: &str) -> Option<String> {
+pub async fn fetch_article(config: &ArticleConfig, url: &str, hn_id: i64) -> Option<String> {
     let client = Client::builder()
         .timeout(Duration::from_secs(config.timeout_secs))
         .user_agent(&config.user_agent)
@@ -18,13 +52,12 @@ pub async fn fetch_article(config: &ArticleConfig, url: &str) -> Option<String> 
     let html = fetch_url(&client, url, config.max_bytes).await;
     if let Some(ref html) = html {
         let text = extract_text(html);
-        if text.len() >= config.min_text_length {
+        if text.len() >= config.min_text_length && !is_low_quality(&text) {
             return Some(text);
         }
-        let snippet: String = html.chars().take(500).collect();
-        warn!(%url, extracted = text.len(), html_len = html.len(),
-            snippet = %snippet,
-            "original fetch text too short, falling through"
+        dump_body(hn_id, "original", html);
+        warn!(%url, %hn_id, extracted = text.len(), html_len = html.len(),
+            "original fetch text too short or low quality, body dumped"
         );
     }
 
@@ -34,17 +67,17 @@ pub async fn fetch_article(config: &ArticleConfig, url: &str) -> Option<String> 
         }
         match fallback.as_str() {
             "jina_reader" => {
-                if let Some(text) = try_jina_reader(&client, url, config).await {
+                if let Some(text) = try_jina_reader(&client, url, config, hn_id).await {
                     return Some(text);
                 }
             }
             "web.archive.org" => {
-                if let Some(text) = try_wayback(&client, url, config).await {
+                if let Some(text) = try_wayback(&client, url, config, hn_id).await {
                     return Some(text);
                 }
             }
             "archive.is" => {
-                if let Some(text) = try_archive_is(&client, url, config).await {
+                if let Some(text) = try_archive_is(&client, url, config, hn_id).await {
                     return Some(text);
                 }
             }
@@ -92,11 +125,11 @@ async fn fetch_url(client: &Client, url: &str, max_bytes: usize) -> Option<Strin
     Some(body_str)
 }
 
-async fn try_archive_is(client: &Client, url: &str, config: &ArticleConfig) -> Option<String> {
+async fn try_archive_is(client: &Client, url: &str, config: &ArticleConfig, hn_id: i64) -> Option<String> {
     let encoded = urlencoding::encode(url);
     let archive_url = format!("https://archive.is/newest/{}", encoded);
 
-    for attempt in 0..2 {
+    for attempt in 0..3 {
         let response = client
             .get(&archive_url)
             .header("User-Agent", &config.user_agent)
@@ -105,36 +138,50 @@ async fn try_archive_is(client: &Client, url: &str, config: &ArticleConfig) -> O
             .ok()?;
 
         let status = response.status();
-        if status == 429 {
-            warn!(%url, attempt, "archive.is rate limited, retrying after delay");
-            tokio::time::sleep(Duration::from_secs(5)).await;
+
+        let body = response.bytes().await.ok()?;
+        let html = String::from_utf8_lossy(&body).to_string();
+
+        let body_lower = html.to_lowercase();
+        let rate_limited = status == 429
+            || body_lower.contains("rate limit")
+            || body_lower.contains("too many requests")
+            || body_lower.contains("try again later");
+
+        if rate_limited {
+            let delay = 5 * (attempt + 1);
+            warn!(%url, attempt, %delay, "archive.is rate limited, retrying after backoff");
+            tokio::time::sleep(Duration::from_secs(delay)).await;
             continue;
         }
+
         if !status.is_success() {
             warn!(%url, %status, "archive.is non-success");
             return None;
         }
 
-        let body = response.bytes().await.ok()?;
-        let html = String::from_utf8_lossy(&body).to_string();
         let text = extract_text(&html);
+
+        if is_low_quality(&text) {
+            dump_body(hn_id, "archive_is", &html);
+            warn!(%url, %hn_id, attempt, "archive.is low quality content, body dumped");
+            continue;
+        }
 
         if text.len() >= 200 {
             return Some(text);
         }
 
-        let snippet: String = html.chars().take(500).collect();
-        warn!(%url, extracted = text.len(), html_len = html.len(),
-            snippet = %snippet,
-            "archive.is text too short or not found"
+        dump_body(hn_id, "archive_is", &html);
+        warn!(%url, %hn_id, extracted = text.len(), html_len = html.len(),
+            "archive.is text too short or not found, body dumped"
         );
-        return None;
     }
 
     None
 }
 
-async fn try_wayback(client: &Client, url: &str, config: &ArticleConfig) -> Option<String> {
+async fn try_wayback(client: &Client, url: &str, config: &ArticleConfig, hn_id: i64) -> Option<String> {
     let cdx_url = format!(
         "https://web.archive.org/cdx/search/cdx?url={}&output=json&limit=3&fl=timestamp,statuscode",
         urlencoding::encode(url)
@@ -161,11 +208,15 @@ async fn try_wayback(client: &Client, url: &str, config: &ArticleConfig) -> Opti
         let text = extract_text(&html);
 
         if text.len() < config.min_text_length {
+            dump_body(hn_id, "wayback", &html);
+            warn!(%url, %hn_id, extracted = text.len(), min = config.min_text_length,
+                "wayback snapshot text too short, body dumped, trying next snapshot");
             continue;
         }
 
-        // Check we didn't get a Wayback error page
-        if text.len() < 300 && text.contains("Wayback Machine") {
+        if is_low_quality(&text) {
+            dump_body(hn_id, "wayback", &html);
+            warn!(%url, %hn_id, "wayback snapshot low-quality content, body dumped, trying next snapshot");
             continue;
         }
 
@@ -175,7 +226,7 @@ async fn try_wayback(client: &Client, url: &str, config: &ArticleConfig) -> Opti
     None
 }
 
-async fn try_jina_reader(client: &Client, url: &str, config: &ArticleConfig) -> Option<String> {
+async fn try_jina_reader(client: &Client, url: &str, config: &ArticleConfig, hn_id: i64) -> Option<String> {
     let reader_url = format!("https://r.jina.ai/{}", url);
 
     let response = client
@@ -195,8 +246,15 @@ async fn try_jina_reader(client: &Client, url: &str, config: &ArticleConfig) -> 
     let body = response.bytes().await.ok()?;
     let text = String::from_utf8_lossy(&body).to_string();
 
+    if is_low_quality(&text) {
+        dump_body(hn_id, "jina", &text);
+        warn!(%url, %hn_id, "jina reader returned low-quality content, body dumped");
+        return None;
+    }
+
     if text.len() < config.min_text_length {
-        warn!(%url, len = text.len(), "jina reader text too short");
+        dump_body(hn_id, "jina", &text);
+        warn!(%url, %hn_id, len = text.len(), "jina reader text too short, body dumped");
         return None;
     }
 

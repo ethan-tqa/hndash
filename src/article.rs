@@ -53,13 +53,25 @@ pub async fn fetch_article(config: &ArticleConfig, url: &str, hn_id: i64, skip_d
 
     if !skip_direct {
         let html = fetch_url(&client, url, config.max_bytes).await;
-        if let Some(ref html) = html {
-            let text = extract_text(html);
-            if text.len() >= config.min_text_length && !is_low_quality(&text) {
+        if let Some(html) = html {
+            let min_len = config.min_text_length;
+            let result = tokio::task::spawn_blocking(move || {
+                let text = extract_text(&html);
+                let ok = text.len() >= min_len && !is_low_quality(&text);
+                (text, html, ok)
+            }).await.unwrap_or_default();
+            let (text, html, ok) = result;
+
+            if ok {
                 return Some(text);
             }
-            dump_body(hn_id, "original", html);
-            warn!(%url, %hn_id, extracted = text.len(), html_len = html.len(),
+
+            let html_len = html.len();
+            tokio::task::spawn_blocking(move || {
+                dump_body(hn_id, "original", &html);
+            }).await.ok();
+
+            warn!(%url, %hn_id, extracted = text.len(), html_len = html_len,
                 "original fetch text too short or low quality, body dumped"
             );
         }
@@ -164,10 +176,17 @@ async fn try_archive(client: &Client, url: &str, config: &ArticleConfig, hn_id: 
             return None;
         }
 
-        let text = extract_text(&html);
+        // extract_text is CPU-bound HTML parsing — run on blocking pool
+        let text = tokio::task::spawn_blocking({
+            let html = html.clone();
+            move || extract_text(&html)
+        }).await.unwrap_or_default();
 
         if is_low_quality(&text) {
-            dump_body(hn_id, domain, &html);
+            tokio::task::spawn_blocking({
+                let domain = domain.to_string();
+                move || dump_body(hn_id, &domain, &html)
+            }).await.ok();
             warn!(%url, %domain, %hn_id, attempt, "archive low quality content, body dumped");
             continue;
         }
@@ -176,8 +195,12 @@ async fn try_archive(client: &Client, url: &str, config: &ArticleConfig, hn_id: 
             return Some(text);
         }
 
-        dump_body(hn_id, domain, &html);
-        warn!(%url, %domain, %hn_id, extracted = text.len(), html_len = html.len(),
+        let html_len = html.len();
+        tokio::task::spawn_blocking({
+            let domain = domain.to_string();
+            move || dump_body(hn_id, &domain, &html)
+        }).await.ok();
+        warn!(%url, %domain, %hn_id, extracted = text.len(), html_len = html_len,
             "archive text too short or not found, body dumped"
         );
     }
@@ -209,22 +232,25 @@ async fn try_wayback(client: &Client, url: &str, config: &ArticleConfig, hn_id: 
         let snapshot_url = format!("https://web.archive.org/web/{}id_/{}", timestamp, url);
 
         let html = fetch_url(client, &snapshot_url, config.max_bytes).await?;
-        let text = extract_text(&html);
+        let min_len = config.min_text_length;
 
-        if text.len() < config.min_text_length {
-            dump_body(hn_id, "wayback", &html);
-            warn!(%url, %hn_id, extracted = text.len(), min = config.min_text_length,
-                "wayback snapshot text too short, body dumped, trying next snapshot");
-            continue;
+        let (text, html, ok) = tokio::task::spawn_blocking(move || {
+            let text = extract_text(&html);
+            let ok = text.len() >= min_len && !is_low_quality(&text);
+            (text, html, ok)
+        }).await.unwrap_or_default();
+
+        if ok {
+            return Some(text);
         }
 
-        if is_low_quality(&text) {
+        let html_len = html.len();
+        tokio::task::spawn_blocking(move || {
             dump_body(hn_id, "wayback", &html);
-            warn!(%url, %hn_id, "wayback snapshot low-quality content, body dumped, trying next snapshot");
-            continue;
-        }
+        }).await.ok();
 
-        return Some(text);
+        warn!(%url, %hn_id, extracted = text.len(), html_len = html_len, min = min_len,
+            "wayback snapshot text too short or low quality, body dumped, trying next snapshot");
     }
 
     warn!(%url, %hn_id, "no viable wayback snapshot found");
@@ -252,14 +278,20 @@ async fn try_jina_reader(client: &Client, url: &str, config: &ArticleConfig, hn_
     let text = String::from_utf8_lossy(&body).to_string();
 
     if is_low_quality(&text) {
-        dump_body(hn_id, "jina", &text);
+        tokio::task::spawn_blocking({
+            let text = text.clone();
+            move || dump_body(hn_id, "jina", &text)
+        }).await.ok();
         warn!(%url, %hn_id, "jina reader returned low-quality content, body dumped");
         return None;
     }
 
     if text.len() < config.min_text_length {
-        dump_body(hn_id, "jina", &text);
-        warn!(%url, %hn_id, len = text.len(), "jina reader text too short, body dumped");
+        let text_len = text.len();
+        tokio::task::spawn_blocking(move || {
+            dump_body(hn_id, "jina", &text);
+        }).await.ok();
+        warn!(%url, %hn_id, len = text_len, "jina reader text too short, body dumped");
         return None;
     }
 

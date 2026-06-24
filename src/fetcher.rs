@@ -75,10 +75,7 @@ pub fn search_url(config: &HnConfig, page: u32) -> String {
         .unwrap()
         .as_secs();
 
-    let mut filters = vec![
-        format!("points>={}", config.min_points),
-        format!("num_comments>={}", config.min_comments),
-    ];
+    let mut filters: Vec<String> = Vec::new();
 
     if config.max_age_hours > 0 {
         let cutoff = now.saturating_sub(config.max_age_hours * 3600);
@@ -140,7 +137,14 @@ pub async fn search_stories(
     }
 
     match serde_json::from_str::<SearchResponse>(&body) {
-        Ok(r) => Some(r),
+        Ok(mut r) => {
+            r.hits.retain(|hit| {
+                let points_ok = hit.points.map_or(true, |p| p >= config.min_points as i32);
+                let comments_ok = hit.num_comments.map_or(true, |c| c >= config.min_comments as i32);
+                points_ok && comments_ok
+            });
+            Some(r)
+        }
         Err(e) => {
             warn!(%page, %status, error = %e, body = %truncate(&body, 500), "search_stories JSON parse error");
             None
